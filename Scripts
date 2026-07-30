@@ -1402,3 +1402,91 @@ buildRocks()
 buildSpawnLocation(centerTopY)
 
 print("Forest Spawn Platform built under workspace.ForestSpawnPlatform")
+
+
+>>>>>>>>>>>>>>>>>>>>> Unified script for Sprint and Shift lock:
+
+
+-- Unified Sprint & Shift Lock Controller
+-- Location: StarterPlayer -> StarterCharacterScripts
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- Wait for character to load
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+-- ===== CONFIG =====
+local SPRINT_SPEED = 28
+local DEFAULT_SPEED = 16
+local SHOULDER_OFFSET = Vector3.new(1.75, 0, 0)
+-- ===================
+
+local shiftLockEnabled = false
+
+-- Function to handle Shift Lock state
+local function setShiftLock(enabled)
+	shiftLockEnabled = enabled
+
+	if enabled then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+		UserInputService.MouseIconEnabled = false
+		humanoid.AutoRotate = false -- Disable default rotation immediately
+	else
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+		humanoid.AutoRotate = true -- Restore normal rotation immediately
+	end
+end
+
+-- Check if Ctrl key is active
+local function isControlHeld()
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) 
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+end
+
+-- Handle Key Press (Down)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		if isControlHeld() then
+			-- If holding Ctrl + Pressing Shift -> Toggle Shift Lock
+			setShiftLock(not shiftLockEnabled)
+		else
+			-- If just pressing Shift alone -> Start Sprinting
+			humanoid.WalkSpeed = SPRINT_SPEED
+		end
+	end
+end)
+
+-- Handle Key Release (Up)
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+		-- Always stop sprinting when Shift is released, regardless of Shift Lock state
+		humanoid.WalkSpeed = DEFAULT_SPEED
+	end
+end)
+
+-- Handle the Camera and Character Rotation every frame
+RunService.RenderStepped:Connect(function()
+	if not shiftLockEnabled then return end
+
+	-- Face the camera direction (Flat Y-axis prevents the character from tilting)
+	local camCFrame = camera.CFrame
+	local lookVector = camCFrame.LookVector
+	local flatLook = Vector3.new(lookVector.X, 0, lookVector.Z)
+
+	if flatLook.Magnitude > 0 then
+		rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + flatLook)
+	end
+
+	-- Nudge the camera to an over-the-shoulder offset
+	camera.CFrame = camCFrame * CFrame.new(SHOULDER_OFFSET)
+end)
