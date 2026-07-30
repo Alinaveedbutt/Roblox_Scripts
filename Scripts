@@ -1490,3 +1490,230 @@ RunService.RenderStepped:Connect(function()
 	-- Nudge the camera to an over-the-shoulder offset
 	camera.CFrame = camCFrame * CFrame.new(SHOULDER_OFFSET)
 end)
+
+
+>>>>>>>>Dash with Animation: 
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+local animator = humanoid:WaitForChild("Animator")
+
+-- ====================
+-- DASH CONFIGURATION
+-- ====================
+local DASH_SPEED = 75       -- How fast the dash propels the player
+local DASH_DURATION = 0.2   -- How long the dash force lasts (in seconds)
+local DASH_COOLDOWN = 1.2   -- Cooldown before dashing again (in seconds)
+
+-- ====================
+-- DASH ANIMATIONS (one per direction)
+-- ====================
+-- Replace each 0 below with the asset ID you published for that direction
+local DASH_ANIMATION_IDS = {
+	Front = "rbxassetid://138682361626833",
+	Back  = "rbxassetid://138682361626833",
+	Left  = "rbxassetid://138682361626833",
+	Right = "rbxassetid://138682361626833",
+}
+
+local dashAnimTracks = {}
+
+for direction, id in pairs(DASH_ANIMATION_IDS) do
+	local anim = Instance.new("Animation")
+	anim.AnimationId = id
+
+	local track = animator:LoadAnimation(anim)
+	track.Priority = Enum.AnimationPriority.Action -- overrides walk/run/idle while it plays
+	track.Looped = false
+
+	dashAnimTracks[direction] = track
+end
+
+-- Figures out which of the 4 clips matches the dash direction relative to
+-- where the character is currently facing
+local function getDashDirectionKey(dashVector)
+	local lookVector = rootPart.CFrame.LookVector
+	local rightVector = rootPart.CFrame.RightVector
+
+	local forwardDot = dashVector:Dot(lookVector)
+	local rightDot = dashVector:Dot(rightVector)
+
+	if math.abs(forwardDot) >= math.abs(rightDot) then
+		return forwardDot >= 0 and "Front" or "Back"
+	else
+		return rightDot >= 0 and "Right" or "Left"
+	end
+end
+
+-- ====================
+-- DASH VFX (limb trails + afterimages)
+-- ====================
+-- Covers both R6 and R15 limb naming so this works on either rig type
+local LIMB_NAMES = {
+	"Left Arm", "Right Arm", "Left Leg", "Right Leg", -- R6
+	"LeftUpperArm", "LeftLowerArm", "LeftHand",
+	"RightUpperArm", "RightLowerArm", "RightHand",
+	"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+	"RightUpperLeg", "RightLowerLeg", "RightFoot", -- R15
+}
+
+local limbTrails = {}
+
+for _, limbName in ipairs(LIMB_NAMES) do
+	local limb = character:FindFirstChild(limbName)
+
+	if limb and limb:IsA("BasePart") then
+		local topAttachment = Instance.new("Attachment")
+		topAttachment.Position = Vector3.new(0, limb.Size.Y / 2, 0)
+		topAttachment.Parent = limb
+
+		local bottomAttachment = Instance.new("Attachment")
+		bottomAttachment.Position = Vector3.new(0, -limb.Size.Y / 2, 0)
+		bottomAttachment.Parent = limb
+
+		local trail = Instance.new("Trail")
+		trail.Attachment0 = topAttachment
+		trail.Attachment1 = bottomAttachment
+		trail.Lifetime = 0.2
+		trail.MinLength = 0
+		trail.FaceCamera = true
+		trail.Color = ColorSequence.new(Color3.new(1, 1, 1))
+		trail.Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.2),
+			NumberSequenceKeypoint.new(1, 1),
+		})
+		trail.WidthScale = NumberSequence.new(0.6)
+		trail.Enabled = false
+		trail.Parent = limb
+
+		table.insert(limbTrails, trail)
+	end
+end
+
+local function setLimbTrailsEnabled(enabled)
+	for _, trail in ipairs(limbTrails) do
+		trail.Enabled = enabled
+	end
+end
+
+-- Leaves a fading, see-through copy of the character behind for a split second
+local function spawnAfterimage()
+	local clone = character:Clone()
+
+	for _, obj in ipairs(clone:GetDescendants()) do
+		if obj:IsA("Script") or obj:IsA("LocalScript") then
+			obj:Destroy()
+		elseif obj:IsA("Humanoid") then
+			obj.PlatformStand = true
+		elseif obj:IsA("Trail") then
+			obj:Destroy()
+		end
+	end
+
+	clone:PivotTo(character:GetPivot())
+	clone.Parent = workspace
+
+	for _, part in ipairs(clone:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Anchored = true
+			part.CanCollide = false
+			part.CanQuery = false
+			part.Transparency = math.clamp(part.Transparency + 0.4, 0, 1)
+			TweenService:Create(part, TweenInfo.new(0.3, Enum.EasingStyle.Quad), { Transparency = 1 }):Play()
+		end
+	end
+
+	Debris:AddItem(clone, 0.35)
+end
+
+-- Turns on the limb trails for half the dash, and spawns afterimages across the full dash
+local function playDashVFX()
+	setLimbTrailsEnabled(true)
+
+	task.delay(DASH_DURATION / 2, function()
+		setLimbTrailsEnabled(false)
+	end)
+
+	task.spawn(function()
+		local elapsed = 0
+		local interval = 0.05
+
+		while elapsed < DASH_DURATION do
+			spawnAfterimage()
+			task.wait(interval)
+			elapsed += interval
+		end
+	end)
+end
+
+local isDashing = false
+local lastDashTime = 0
+
+local function performDash()
+	local currentTime = os.clock()
+
+	-- Check cooldown and active state
+	if isDashing or (currentTime - lastDashTime < DASH_COOLDOWN) then
+		return
+	end
+	-- Prevent dashing while sitting or dead
+	if humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid.Sit then
+		return
+	end
+
+	isDashing = true
+	lastDashTime = currentTime
+
+	-- Determine direction: Dash toward movement direction (WASD), or forward if standing still
+	local moveDirection = humanoid.MoveDirection
+	local dashVector
+
+	if moveDirection.Magnitude > 0 then
+		dashVector = moveDirection.Unit
+	else
+		dashVector = rootPart.CFrame.LookVector
+	end
+
+	-- Play the animation that matches this dash's direction
+	local directionKey = getDashDirectionKey(dashVector)
+	local trackToPlay = dashAnimTracks[directionKey]
+
+	if trackToPlay then
+		trackToPlay:Play(0.05) -- quick fade-in so it doesn't look snappy
+	end
+
+	-- Play the trail + afterimage VFX
+	playDashVFX()
+
+	-- Create velocity constraints for physics-based movement
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = rootPart
+
+	local linearVelocity = Instance.new("LinearVelocity")
+	linearVelocity.Attachment0 = attachment
+	linearVelocity.MaxForce = 100000 -- High force to overcome friction/momentum
+	linearVelocity.VectorVelocity = dashVector * DASH_SPEED
+	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	linearVelocity.Parent = rootPart
+
+	-- Remove velocity force after the duration ends
+	task.delay(DASH_DURATION, function()
+		linearVelocity:Destroy()
+		attachment:Destroy()
+		isDashing = false
+	end)
+end
+
+-- Listen for keypress
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	-- Ignore keypresses if typing in chat or interacting with UI
+	if gameProcessed then return end
+	if input.KeyCode == Enum.KeyCode.Q then
+		performDash()
+	end
+end)
