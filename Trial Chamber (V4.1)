@@ -1,0 +1,2852 @@
+--[[
+	TRIAL CHAMBER V2 - HUB AND SPOKE DRAFT
+	---------------------------------------
+	Safe architectural draft:
+	- Does NOT modify Workspace.TrialChamber.
+	- Rebuilds only Workspace.TrialChamberV2 on each run.
+	- Room A, B, and C attach to one main hub.
+]]
+
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
+
+----------------------------------------------------------------------
+-- CONFIG
+----------------------------------------------------------------------
+
+local CONFIG = {
+	draftOffset = Vector3.new(0, 0, 400),
+
+	hub = {
+		radius = 25,
+		height = 18,
+		wallThickness = 3,
+		floorSize = 50,
+	},
+
+	corridor = {
+		width = 16,
+		height = 18,
+		length = 32,
+		wallThickness = 1,
+	},
+
+	roomA = {
+		width = 18,
+		height = 18,
+		length = 100,
+	},
+
+	roomB = {
+		radius = 34,
+		wallHeight = 22,
+		wallSegments = 32,
+		domeHeight = 14,
+	},
+
+	roomC = {
+		radius = 36,
+		wallHeight = 22,
+		wallSegments = 32,
+		domeHeight = 22,
+	},
+
+	materials = {
+		floor = Enum.Material.Slate,
+		wall = Enum.Material.Cobblestone,
+		dome = Enum.Material.Basalt,
+		rubble = Enum.Material.Rock,
+		metal = Enum.Material.Metal,
+		neon = Enum.Material.Neon,
+		trim = Enum.Material.Concrete,
+		torchWood = Enum.Material.Wood,
+		wood = Enum.Material.WoodPlanks,
+		spikeSteel = Enum.Material.CorrodedMetal,
+	},
+
+	colors = {
+		floor = Color3.fromRGB(58, 58, 63),
+		wall = Color3.fromRGB(72, 70, 75),
+		wallC = Color3.fromRGB(42, 46, 60),
+		domeB = Color3.fromRGB(48, 47, 52),
+		domeC = Color3.fromRGB(9, 11, 28),
+		metal = Color3.fromRGB(35, 35, 40),
+		rubble = Color3.fromRGB(80, 76, 70),
+		crystal = Color3.fromRGB(255, 150, 45),
+		portal = Color3.fromRGB(120, 190, 255),
+		star = Color3.fromRGB(255, 255, 255),
+		statue = Color3.fromRGB(90, 90, 95),
+		torch = Color3.fromRGB(255, 140, 60),
+		danger = Color3.fromRGB(92, 35, 35),
+		trim = Color3.fromRGB(50, 48, 53),
+		torchWood = Color3.fromRGB(46, 33, 23),
+		ancientStone = Color3.fromRGB(54, 56, 52),
+		wood = Color3.fromRGB(92, 64, 39),
+		spikeSteel = Color3.fromRGB(52, 54, 58),
+		spring = Color3.fromRGB(118, 120, 126),
+		counterweight = Color3.fromRGB(40, 40, 44),
+	},
+
+	-- Structural polish tuning (pillars, trim bands, beams, torches).
+	-- Purely cosmetic/geometric: nothing here drives gameplay.
+	detail = {
+		pillarInset = 0.4,      -- how far corner pillars sit proud of the wall face
+		pillarSize = 2.2,       -- pillar footprint (square, studs)
+		corniceHeight = 1.1,    -- trim band height at wall/ceiling junction
+		corniceDrop = 0.65,     -- how far the cornice hangs below the ceiling
+		corniceProud = 0.5,     -- how far the cornice sits proud of the wall face
+		baseboardHeight = 1.6,  -- trim band height at wall/floor junction
+		baseboardProud = 0.45,  -- how far the baseboard sits proud of the wall face
+		beamThickness = 1.2,    -- ceiling support beam cross-section (height)
+		beamDepth = 1.8,        -- ceiling support beam cross-section (depth)
+		beamDrop = 0.6,         -- how far beams hang below the ceiling
+		beamSpacing = 13,       -- distance between ceiling support beams
+		torchSpacing = 17,      -- distance between wall torches along a run
+		torchHeight = 8.5,      -- torch mount height off the floor
+	},
+
+	-- Stone-housed mechanical spike trap (geometry only; a future
+	-- SpikeTrapModule reads the attributes stamped on the built model).
+	spikeTrap = {
+		width = 11,             -- mechanism footprint, right axis
+		depth = 9,              -- mechanism footprint, forward axis
+		housingMargin = 2.1,    -- how far the stone housing extends past the mechanism
+		housingLowHeight = 0.9, -- lower stone course height
+		housingCapHeight = 0.55,-- upper (inset) stone course height
+		pitDepth = 1.6,         -- how far the mechanism recesses below floor
+		frameThickness = 0.9,   -- metal frame beam cross-section
+		plankCount = 6,         -- static wood planks spanning the depth
+		plankGap = 0.4,         -- gap between planks (spikes rise through these)
+		spikeCols = 3,          -- spike columns across the width
+		spikeBaseRadius = 0.5,  -- spike radius at the base
+		spikeHeight = 2.8,      -- spike length, base to tip
+		spikeSegments = 4,      -- tapering cylinder segments per spike
+		springCoils = 4,        -- visible coil loops per corner spring
+		restOffsetY = -1.0,     -- spike bed resting height (hidden below planks)
+		extendOffsetY = 3.4,    -- spike bed extended height (tips above floor)
+		cycleSeconds = 4.5,     -- full idle-to-strike-to-reset cycle
+		damage = 34,            -- contact damage while extended
+	},
+
+	-- Pendulum blade assembly (geometry only; a future SpikeTrapModule
+	-- swings it using the attributes stamped on the built model).
+	swingingBlade = {
+		mountDrop = 3.0,        -- ceiling support post length down to the axle
+		axleLength = 3.2,       -- axle rod length (also support post spacing)
+		armLength = 11,         -- pivot to blade-center distance
+		bladeRadius = 3.2,      -- blade disc radius
+		counterArmLength = 1.3, -- pivot to counterweight distance (opposite side)
+		counterweightRadius = 0.85,
+		chainLinks = 5,         -- decorative ceiling-to-pivot chain links
+		swingDegrees = 42,      -- pendulum amplitude from rest
+		periodSeconds = 3.2,    -- full swing period (there and back)
+		damage = 40,            -- contact damage while sweeping
+	},
+
+	-- Ancient stone portcullis sealing Room A's exit (geometry only;
+	-- future gate logic reads OpenOffsetY/ClosedOffsetY off the model).
+	portcullis = {
+		verticalBars = 7,
+		horizontalBars = 4,
+		leafHeightRatio = 0.5, -- leaf height as a fraction of room height
+	},
+}
+
+----------------------------------------------------------------------
+-- HELPERS
+----------------------------------------------------------------------
+
+local random = Random.new(20260802)
+
+local function unitXZ(vector)
+	local flat = Vector3.new(vector.X, 0, vector.Z)
+
+	if flat.Magnitude == 0 then
+		return Vector3.new(0, 0, -1)
+	end
+
+	return flat.Unit
+end
+
+local function getRight(forward)
+	return Vector3.new(-forward.Z, 0, forward.X)
+end
+
+local function orientedCFrame(position, forward)
+	forward = unitXZ(forward)
+
+	local right = getRight(forward)
+
+	return CFrame.fromMatrix(
+		position,
+		right,
+		Vector3.new(0, 1, 0),
+		-forward
+	)
+end
+
+local function newFolder(parent, name)
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+
+	return folder
+end
+
+local function newPart(properties)
+	local part = Instance.new("Part")
+
+	part.Name = properties.Name or "Part"
+	part.Anchored = true
+	part.CanCollide = properties.CanCollide ~= false
+	part.CanQuery = properties.CanQuery ~= false
+	part.CastShadow = properties.CastShadow ~= false
+
+	part.Size = properties.Size
+	part.CFrame = properties.CFrame
+
+	part.Material = properties.Material or Enum.Material.SmoothPlastic
+	part.Color = properties.Color or Color3.fromRGB(150, 150, 150)
+
+	if properties.Shape then
+		part.Shape = properties.Shape
+	end
+
+	if properties.Transparency then
+		part.Transparency = properties.Transparency
+	end
+
+	part.Parent = properties.Parent
+
+	return part
+end
+
+local function addGlow(part, color, range, brightness)
+	local light = Instance.new("PointLight")
+
+	light.Color = color
+	light.Range = range or 16
+	light.Brightness = brightness or 2
+	light.Shadows = true
+	light.Parent = part
+end
+
+local function addOrientedPart(parent, name, size, position, forward, material, color, options)
+	options = options or {}
+
+	return newPart({
+		Name = name,
+		Size = size,
+		CFrame = orientedCFrame(position, forward),
+		Material = material,
+		Color = color,
+		Transparency = options.Transparency,
+		CanCollide = options.CanCollide,
+		CanQuery = options.CanQuery,
+		CastShadow = options.CastShadow,
+		Parent = parent,
+	})
+end
+
+local function getExistingChamberFloorPosition()
+	local existing = Workspace:FindFirstChild("TrialChamber")
+
+	if not existing then
+		return Vector3.new(0, 0, 0)
+	end
+
+	local centralHub = existing:FindFirstChild("CentralHub")
+
+	if centralHub then
+		local floor = centralHub:FindFirstChild("Floor", true)
+
+		if floor and floor:IsA("BasePart") then
+			return Vector3.new(
+				floor.Position.X,
+				floor.Position.Y + floor.Size.Y / 2,
+				floor.Position.Z
+			)
+		end
+
+		local part = centralHub:FindFirstChildWhichIsA("BasePart", true)
+
+		if part then
+			return Vector3.new(
+				part.Position.X,
+				part.Position.Y + part.Size.Y / 2,
+				part.Position.Z
+			)
+		end
+	end
+
+	local part = existing:FindFirstChildWhichIsA("BasePart", true)
+
+	if part then
+		return Vector3.new(
+			part.Position.X,
+			part.Position.Y + part.Size.Y / 2,
+			part.Position.Z
+		)
+	end
+
+	return Vector3.new(0, 0, 0)
+end
+
+----------------------------------------------------------------------
+-- STRUCTURAL DETAIL HELPERS
+----------------------------------------------------------------------
+-- Cosmetic/geometric only: pilasters, trim bands, ceiling beams, wall
+-- torches, rubble scatter, and a dome apex cap. These close seams,
+-- dress corners, and add depth to the existing rooms without moving
+-- any floor, wall, or doorway that gameplay already depends on.
+
+local function addPilaster(parent, name, floorPosition, forward, height, material, color)
+	local d = CONFIG.detail
+	local mount = floorPosition + forward * d.pillarInset
+
+	addOrientedPart(
+		parent,
+		name .. "_Base",
+		Vector3.new(d.pillarSize + 0.6, 1, d.pillarSize + 0.6),
+		mount + Vector3.new(0, 0.5, 0),
+		forward,
+		material,
+		color
+	)
+
+	addOrientedPart(
+		parent,
+		name .. "_Shaft",
+		Vector3.new(d.pillarSize, height - 2, d.pillarSize),
+		mount + Vector3.new(0, height / 2, 0),
+		forward,
+		material,
+		color
+	)
+
+	addOrientedPart(
+		parent,
+		name .. "_Capital",
+		Vector3.new(d.pillarSize + 0.6, 1, d.pillarSize + 0.6),
+		mount + Vector3.new(0, height - 0.5, 0),
+		forward,
+		material,
+		color
+	)
+end
+
+local function addCorniceBand(parent, name, floorPosition, forward, length, wallHeight, material, color)
+	local d = CONFIG.detail
+
+	return addOrientedPart(
+		parent,
+		name .. "_Cornice",
+		Vector3.new(length, d.corniceHeight, 1),
+		floorPosition
+			+ forward * d.corniceProud
+			+ Vector3.new(0, wallHeight - d.corniceDrop, 0),
+		forward,
+		material,
+		color
+	)
+end
+
+local function addBaseboardBand(parent, name, floorPosition, forward, length, material, color)
+	local d = CONFIG.detail
+
+	return addOrientedPart(
+		parent,
+		name .. "_Baseboard",
+		Vector3.new(length, d.baseboardHeight, 1),
+		floorPosition
+			+ forward * d.baseboardProud
+			+ Vector3.new(0, d.baseboardHeight / 2, 0),
+		forward,
+		material,
+		color
+	)
+end
+
+local function addCeilingBeam(parent, name, centerPosition, forward, span, ceilingHeight, material, color)
+	local d = CONFIG.detail
+
+	return addOrientedPart(
+		parent,
+		name .. "_Beam",
+		Vector3.new(span, d.beamThickness, d.beamDepth),
+		centerPosition + Vector3.new(0, ceilingHeight - d.beamDrop, 0),
+		forward,
+		material,
+		color
+	)
+end
+
+-- Lays ceiling beams every `detail.beamSpacing` studs along a straight run
+-- (corridor or Room A hall) between startDistance and endDistance.
+local function layCeilingBeams(parent, namePrefix, originPosition, forward, span, ceilingHeight, startDistance, endDistance, material, color)
+	local spacing = CONFIG.detail.beamSpacing
+	local index = 0
+	local distance = startDistance + spacing / 2
+
+	while distance < endDistance do
+		index = index + 1
+
+		addCeilingBeam(
+			parent,
+			namePrefix .. "_" .. index,
+			originPosition + forward * distance,
+			forward,
+			span,
+			ceilingHeight,
+			material,
+			color
+		)
+
+		distance = distance + spacing
+	end
+end
+
+local function addWallTorch(parent, name, floorPosition, forward, mountHeight)
+	local torch = newFolder(parent, name)
+
+	addOrientedPart(
+		torch,
+		"Bracket",
+		Vector3.new(0.6, 0.6, 1.4),
+		floorPosition + forward * 0.3 + Vector3.new(0, mountHeight, 0),
+		forward,
+		CONFIG.materials.metal,
+		CONFIG.colors.metal
+	)
+
+	addOrientedPart(
+		torch,
+		"Stick",
+		Vector3.new(0.35, 2.2, 0.35),
+		floorPosition + forward * 0.9 + Vector3.new(0, mountHeight + 0.9, 0),
+		forward,
+		CONFIG.materials.torchWood,
+		CONFIG.colors.torchWood
+	)
+
+	local flame = newPart({
+		Name = "Flame",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(0.9, 1.1, 0.9),
+		CFrame = CFrame.new(floorPosition + forward * 0.9 + Vector3.new(0, mountHeight + 2.15, 0)),
+		Material = CONFIG.materials.neon,
+		Color = CONFIG.colors.torch,
+		Transparency = 0.1,
+		CanCollide = false,
+		CanQuery = false,
+		CastShadow = false,
+		Parent = torch,
+	})
+
+	addGlow(flame, CONFIG.colors.torch, 14, 2.5)
+
+	return torch
+end
+
+-- Lays wall torches every `detail.torchSpacing` studs along a straight run.
+-- `wallOriginPosition` is a floor point on the wall's own line (already
+-- offset to the side wall); `travelForward` spaces torches along that
+-- line; `faceDirection` is the direction the torch faces into the room.
+local function layWallTorches(parent, namePrefix, wallOriginPosition, travelForward, faceDirection, startDistance, endDistance)
+	local spacing = CONFIG.detail.torchSpacing
+	local index = 0
+	local distance = startDistance + spacing / 2
+
+	while distance < endDistance do
+		index = index + 1
+
+		addWallTorch(
+			parent,
+			namePrefix .. "_" .. index,
+			wallOriginPosition + travelForward * distance,
+			faceDirection,
+			CONFIG.detail.torchHeight
+		)
+
+		distance = distance + spacing
+	end
+end
+
+local function addRubblePile(parent, name, centerPosition, chunkCount, spreadRadius)
+	local pile = newFolder(parent, name)
+
+	for index = 1, chunkCount do
+		local angle = random:NextNumber() * math.pi * 2
+		local distance = random:NextNumber() * spreadRadius
+		local size = 0.8 + random:NextNumber() * 1.6
+
+		local offset = Vector3.new(
+			math.cos(angle) * distance,
+			size * 0.35,
+			math.sin(angle) * distance
+		)
+
+		newPart({
+			Name = "Chunk_" .. index,
+			Size = Vector3.new(size, size * 0.7, size * 0.9),
+			CFrame = CFrame.new(centerPosition + offset) * CFrame.Angles(
+				random:NextNumber() * math.pi,
+				random:NextNumber() * math.pi,
+				random:NextNumber() * math.pi
+			),
+			Material = CONFIG.materials.rubble,
+			Color = CONFIG.colors.rubble,
+			Parent = pile,
+		})
+	end
+
+	return pile
+end
+
+-- Closes the apex of a ring-built dome (buildDome) where the top ring's
+-- panels converge toward a single point and would otherwise clip/overlap
+-- instead of meeting cleanly.
+local function addDomeCap(parent, centerPosition, wallHeight, domeHeight, material, color)
+	local apexPosition = centerPosition + Vector3.new(0, wallHeight + domeHeight, 0)
+
+	return newPart({
+		Name = "DomeCap",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(2.8, 2.2, 2.8),
+		CFrame = CFrame.new(apexPosition + Vector3.new(0, -0.35, 0)),
+		Material = material,
+		Color = color,
+		Parent = parent,
+	})
+end
+
+----------------------------------------------------------------------
+-- ARCHES AND GATES
+----------------------------------------------------------------------
+
+local function buildDoorFrame(parent, name, floorPosition, forward, width, height, material, color)
+	local folder = newFolder(parent, name)
+
+	local right = getRight(forward)
+	local postThickness = 1.5
+	local postHeight = height
+	local lintelHeight = 1.5
+
+	local leftPosition =
+		floorPosition
+	- right * (width / 2 + postThickness / 2)
+		+ Vector3.new(0, postHeight / 2, 0)
+
+	local rightPosition =
+		floorPosition
+		+ right * (width / 2 + postThickness / 2)
+		+ Vector3.new(0, postHeight / 2, 0)
+
+	addOrientedPart(
+		folder,
+		"LeftPillar",
+		Vector3.new(postThickness, postHeight, 2),
+		leftPosition,
+		forward,
+		material,
+		color
+	)
+
+	addOrientedPart(
+		folder,
+		"RightPillar",
+		Vector3.new(postThickness, postHeight, 2),
+		rightPosition,
+		forward,
+		material,
+		color
+	)
+
+	addOrientedPart(
+		folder,
+		"Lintel",
+		Vector3.new(width + postThickness * 2, lintelHeight, 2),
+		floorPosition + Vector3.new(0, height - lintelHeight / 2, 0),
+		forward,
+		material,
+		color
+	)
+
+	return folder
+end
+
+local function buildBarredGate(parent, name, floorPosition, forward, width, height)
+	local folder = newFolder(parent, name)
+
+	buildDoorFrame(
+		folder,
+		"StoneFrame",
+		floorPosition,
+		forward,
+		width,
+		height,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	local right = getRight(forward)
+	local barCount = 9
+	local usableWidth = width - 1
+	local spacing = usableWidth / (barCount - 1)
+
+	for index = 0, barCount - 1 do
+		local sideOffset = -usableWidth / 2 + spacing * index
+
+		addOrientedPart(
+			folder,
+			"Bar_" .. (index + 1),
+			Vector3.new(0.55, height - 2, 0.55),
+			floorPosition
+				+ right * sideOffset
+				+ Vector3.new(0, (height - 2) / 2 + 0.5, 0),
+			forward,
+			CONFIG.materials.metal,
+			CONFIG.colors.metal
+		)
+	end
+
+	addOrientedPart(
+		folder,
+		"Crossbar",
+		Vector3.new(width, 0.65, 0.7),
+		floorPosition + Vector3.new(0, height * 0.55, 0),
+		forward,
+		CONFIG.materials.metal,
+		CONFIG.colors.metal
+	)
+
+	return folder
+end
+
+----------------------------------------------------------------------
+-- CENTRAL HUB
+----------------------------------------------------------------------
+
+local function buildCentralHub(root, basePosition, branches)
+	local hub = newFolder(root, "CentralHub")
+
+	local radius = CONFIG.hub.radius
+	local height = CONFIG.hub.height
+	local thickness = CONFIG.hub.wallThickness
+	local sideLength = 2 * radius * math.tan(math.pi / 8)
+	local circumradius = radius / math.cos(math.pi / 8)
+
+	newPart({
+		Name = "HubFloor",
+		Size = Vector3.new(
+			CONFIG.hub.floorSize,
+			1,
+			CONFIG.hub.floorSize
+		),
+		CFrame = CFrame.new(basePosition + Vector3.new(0, -0.5, 0)),
+		Material = CONFIG.materials.floor,
+		Color = CONFIG.colors.floor,
+		Parent = hub,
+	})
+
+	newPart({
+		Name = "HubCeiling",
+		Size = Vector3.new(
+			CONFIG.hub.floorSize,
+			1,
+			CONFIG.hub.floorSize
+		),
+		CFrame = CFrame.new(basePosition + Vector3.new(0, height + 0.5, 0)),
+		Material = CONFIG.materials.wall,
+		Color = CONFIG.colors.wall,
+		Parent = hub,
+	})
+
+	for index = 0, 7 do
+		local angle = math.rad(index * 45)
+		local normal = Vector3.new(math.cos(angle), 0, math.sin(angle))
+		local isOpening = false
+
+		for _, branch in ipairs(branches) do
+			if normal:Dot(branch.forward) > 0.97 then
+				isOpening = true
+				break
+			end
+		end
+
+		if not isOpening then
+			local wallFloorPosition = basePosition + normal * radius
+
+			addOrientedPart(
+				hub,
+				"HubWall_" .. (index + 1),
+				Vector3.new(sideLength + 1, height, thickness),
+				wallFloorPosition + Vector3.new(0, height / 2, 0),
+				normal,
+				CONFIG.materials.wall,
+				CONFIG.colors.wall
+			)
+
+			addCorniceBand(
+				hub,
+				"HubWall_" .. (index + 1),
+				wallFloorPosition,
+				normal,
+				sideLength,
+				height,
+				CONFIG.materials.trim,
+				CONFIG.colors.trim
+			)
+
+			addBaseboardBand(
+				hub,
+				"HubWall_" .. (index + 1),
+				wallFloorPosition,
+				normal,
+				sideLength,
+				CONFIG.materials.trim,
+				CONFIG.colors.trim
+			)
+
+			addWallTorch(
+				hub,
+				"HubTorch_" .. (index + 1),
+				basePosition + normal * (radius - 1.6),
+				-normal,
+				CONFIG.detail.torchHeight
+			)
+		end
+	end
+
+	-- Pilasters at every hub corner, including the corners flanking each
+	-- branch opening, where they double as a jamb cap for the exposed
+	-- wall-stub end instead of leaving it as a bare cross-section.
+	for index = 0, 7 do
+		local cornerAngle = math.rad((index + 0.5) * 45)
+		local cornerNormal = Vector3.new(math.cos(cornerAngle), 0, math.sin(cornerAngle))
+		local cornerPosition = basePosition + cornerNormal * circumradius
+
+		addPilaster(
+			hub,
+			"HubPilaster_" .. (index + 1),
+			cornerPosition,
+			cornerNormal,
+			height,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+	end
+
+	-- Door surrounds at each branch opening: the hub's opening span
+	-- (~sideLength) is wider than a corridor mouth (corridor.width + 2
+	-- walls), which otherwise leaves an undressed gap at the junction.
+	-- Framing it here, at the same point corridors start from, resolves
+	-- that transition without changing the corridor or hub footprint.
+	for _, branch in ipairs(branches) do
+		buildDoorFrame(
+			hub,
+			"HubOpening_" .. branch.name,
+			basePosition + branch.forward * (radius - 1),
+			branch.forward,
+			CONFIG.corridor.width,
+			height - 1,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+	end
+
+	local startMarker = newPart({
+		Name = "DraftStartPoint",
+		Size = Vector3.new(5, 0.25, 5),
+		CFrame = CFrame.new(basePosition + Vector3.new(0, 0.15, 0)),
+		Material = CONFIG.materials.neon,
+		Color = CONFIG.colors.portal,
+		Transparency = 0.45,
+		CanCollide = false,
+		CanQuery = false,
+		Parent = hub,
+	})
+
+	addGlow(startMarker, CONFIG.colors.portal, 10, 1)
+
+	return hub
+end
+
+----------------------------------------------------------------------
+-- CORRIDORS
+----------------------------------------------------------------------
+
+local function buildCorridor(root, name, startPosition, forward, length)
+	local corridor = newFolder(root, name)
+
+	local width = CONFIG.corridor.width
+	local height = CONFIG.corridor.height
+	local wallThickness = CONFIG.corridor.wallThickness
+	local right = getRight(forward)
+	local center = startPosition + forward * (length / 2)
+
+	addOrientedPart(
+		corridor,
+		"Floor",
+		Vector3.new(width, 1, length),
+		center + Vector3.new(0, -0.5, 0),
+		forward,
+		CONFIG.materials.floor,
+		CONFIG.colors.floor
+	)
+
+	addOrientedPart(
+		corridor,
+		"Ceiling",
+		Vector3.new(width, 1, length),
+		center + Vector3.new(0, height + 0.5, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		corridor,
+		"WallLeft",
+		Vector3.new(wallThickness, height, length),
+		center
+		- right * (width / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		corridor,
+		"WallRight",
+		Vector3.new(wallThickness, height, length),
+		center
+			+ right * (width / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	local leftWallOrigin = startPosition - right * (width / 2)
+	local rightWallOrigin = startPosition + right * (width / 2)
+
+	addCorniceBand(corridor, "WallLeft", leftWallOrigin, forward, length, height, CONFIG.materials.trim, CONFIG.colors.trim)
+	addCorniceBand(corridor, "WallRight", rightWallOrigin, forward, length, height, CONFIG.materials.trim, CONFIG.colors.trim)
+	addBaseboardBand(corridor, "WallLeft", leftWallOrigin, forward, length, CONFIG.materials.trim, CONFIG.colors.trim)
+	addBaseboardBand(corridor, "WallRight", rightWallOrigin, forward, length, CONFIG.materials.trim, CONFIG.colors.trim)
+
+	layCeilingBeams(corridor, "Beam", startPosition, forward, width, height, 0, length, CONFIG.materials.wall, CONFIG.colors.wall)
+	layWallTorches(corridor, "TorchLeft", leftWallOrigin, forward, right, 0, length)
+	layWallTorches(corridor, "TorchRight", rightWallOrigin, forward, -right, 0, length)
+
+	return corridor
+end
+
+----------------------------------------------------------------------
+-- ROOM A: MECHANICAL HAZARDS
+----------------------------------------------------------------------
+-- Real, modeled hazards for the Shadows hall: stone-housed spike traps,
+-- an axle-mounted pendulum blade, and a stone portcullis. Every visible
+-- surface here is the actual collidable geometry -- there is no
+-- separate invisible hitbox standing in for the trap. Gameplay state
+-- lives only as Attributes + CollectionService tags for now; a future
+-- SpikeTrapModule reads them to actually animate and damage.
+
+-- A cylinder whose length axis runs along a horizontal direction
+-- (rather than the vertical convention used elsewhere in this file).
+-- Used for axles, arms, and pendulum discs that swing across a path.
+local function horizontalAxisCFrame(position, axisDirection)
+	return CFrame.fromMatrix(position, unitXZ(axisDirection), Vector3.new(0, 1, 0))
+end
+
+local function buildSpikeTrap(parent, name, floorPosition, forward)
+	local right = getRight(forward)
+	local t = CONFIG.spikeTrap
+	local trap = newFolder(parent, name)
+
+	----------------------------------------------------------------
+	-- Stone housing: two stacked, inset courses of ancient stone
+	-- socketing the mechanism into the floor. This is what makes the
+	-- trap read as "built into the room" rather than dropped on top.
+	----------------------------------------------------------------
+	local lowOuterWidth = t.width + t.housingMargin * 2
+	local lowOuterDepth = t.depth + t.housingMargin * 2
+	local capOuterWidth = t.width + t.housingMargin
+	local capOuterDepth = t.depth + t.housingMargin
+
+	local function buildHousingRing(ringName, outerWidth, outerDepth, ringThickness, yCenter, ringHeight, material, color)
+		addOrientedPart(trap, ringName .. "_Front", Vector3.new(outerWidth, ringHeight, ringThickness),
+			floorPosition + forward * (outerDepth / 2 - ringThickness / 2) + Vector3.new(0, yCenter, 0),
+			forward, material, color)
+
+		addOrientedPart(trap, ringName .. "_Back", Vector3.new(outerWidth, ringHeight, ringThickness),
+			floorPosition - forward * (outerDepth / 2 - ringThickness / 2) + Vector3.new(0, yCenter, 0),
+			forward, material, color)
+
+		addOrientedPart(trap, ringName .. "_Left", Vector3.new(ringThickness, ringHeight, outerDepth - ringThickness * 2),
+			floorPosition - right * (outerWidth / 2 - ringThickness / 2) + Vector3.new(0, yCenter, 0),
+			forward, material, color)
+
+		addOrientedPart(trap, ringName .. "_Right", Vector3.new(ringThickness, ringHeight, outerDepth - ringThickness * 2),
+			floorPosition + right * (outerWidth / 2 - ringThickness / 2) + Vector3.new(0, yCenter, 0),
+			forward, material, color)
+	end
+
+	buildHousingRing("HousingLow", lowOuterWidth, lowOuterDepth, t.housingMargin * 0.85,
+		t.housingLowHeight / 2, t.housingLowHeight, CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+	buildHousingRing("HousingCap", capOuterWidth, capOuterDepth, t.housingMargin * 0.6,
+		t.housingLowHeight + t.housingCapHeight / 2, t.housingCapHeight, CONFIG.materials.wall, CONFIG.colors.wall)
+
+	-- Carved corner stones, oversized relative to the metal brackets
+	-- further in, so the housing itself reads as heavy construction.
+	local housingCorners = {
+		floorPosition - right * (lowOuterWidth / 2 - 0.9) - forward * (lowOuterDepth / 2 - 0.9),
+		floorPosition + right * (lowOuterWidth / 2 - 0.9) - forward * (lowOuterDepth / 2 - 0.9),
+		floorPosition - right * (lowOuterWidth / 2 - 0.9) + forward * (lowOuterDepth / 2 - 0.9),
+		floorPosition + right * (lowOuterWidth / 2 - 0.9) + forward * (lowOuterDepth / 2 - 0.9),
+	}
+
+	for index, cornerPos in ipairs(housingCorners) do
+		newPart({
+			Name = "HousingCornerStone_" .. index,
+			Size = Vector3.new(1.8, t.housingLowHeight + t.housingCapHeight + 0.3, 1.8),
+			CFrame = CFrame.new(cornerPos + Vector3.new(0, (t.housingLowHeight + t.housingCapHeight) / 2, 0)),
+			Material = CONFIG.materials.wall,
+			Color = CONFIG.colors.ancientStone,
+			Parent = trap,
+		})
+	end
+
+	-- Decorative gear medallion set into the front stone face -- sells
+	-- the "mechanical device built into ancient stone" read at a glance.
+	local gearCenter = floorPosition
+		+ forward * (lowOuterDepth / 2 - t.housingMargin * 0.425)
+		+ Vector3.new(0, t.housingLowHeight * 0.55, 0)
+	local gearAxis = horizontalAxisCFrame(gearCenter, forward)
+
+	newPart({
+		Name = "GearMedallion_Hub",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.3, 1.4, 1.4),
+		CFrame = gearAxis,
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = trap,
+	})
+
+	for toothIndex = 0, 9 do
+		local toothAngle = math.rad(toothIndex * 36)
+
+		newPart({
+			Name = "GearMedallion_Tooth" .. toothIndex,
+			Size = Vector3.new(0.32, 0.4, 0.4),
+			CFrame = gearAxis * CFrame.Angles(toothAngle, 0, 0) * CFrame.new(0, 0.85, 0),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = trap,
+		})
+	end
+
+	----------------------------------------------------------------
+	-- Recessed mechanism: metal frame, guide rails, springs, internal
+	-- bracing, static planks (with gaps), and the pit housing floor.
+	----------------------------------------------------------------
+	newPart({
+		Name = "PitFloor",
+		Size = Vector3.new(t.width, 0.4, t.depth),
+		CFrame = orientedCFrame(floorPosition + Vector3.new(0, -t.pitDepth - 0.2, 0), forward),
+		Material = CONFIG.materials.spikeSteel,
+		Color = CONFIG.colors.spikeSteel,
+		Parent = trap,
+	})
+
+	addOrientedPart(trap, "FrameFront", Vector3.new(t.width + t.frameThickness * 2, 0.3, t.frameThickness),
+		floorPosition + forward * (t.depth / 2 + t.frameThickness / 2) + Vector3.new(0, 0.15, 0),
+		forward, CONFIG.materials.metal, CONFIG.colors.metal)
+
+	addOrientedPart(trap, "FrameBack", Vector3.new(t.width + t.frameThickness * 2, 0.3, t.frameThickness),
+		floorPosition - forward * (t.depth / 2 + t.frameThickness / 2) + Vector3.new(0, 0.15, 0),
+		forward, CONFIG.materials.metal, CONFIG.colors.metal)
+
+	addOrientedPart(trap, "FrameLeft", Vector3.new(t.frameThickness, 0.3, t.depth),
+		floorPosition - right * (t.width / 2 + t.frameThickness / 2) + Vector3.new(0, 0.15, 0),
+		forward, CONFIG.materials.metal, CONFIG.colors.metal)
+
+	addOrientedPart(trap, "FrameRight", Vector3.new(t.frameThickness, 0.3, t.depth),
+		floorPosition + right * (t.width / 2 + t.frameThickness / 2) + Vector3.new(0, 0.15, 0),
+		forward, CONFIG.materials.metal, CONFIG.colors.metal)
+
+	local frameCorners = {
+		floorPosition - right * (t.width / 2 + t.frameThickness / 2) - forward * (t.depth / 2 + t.frameThickness / 2),
+		floorPosition + right * (t.width / 2 + t.frameThickness / 2) - forward * (t.depth / 2 + t.frameThickness / 2),
+		floorPosition - right * (t.width / 2 + t.frameThickness / 2) + forward * (t.depth / 2 + t.frameThickness / 2),
+		floorPosition + right * (t.width / 2 + t.frameThickness / 2) + forward * (t.depth / 2 + t.frameThickness / 2),
+	}
+
+	for index, cornerPos in ipairs(frameCorners) do
+		newPart({
+			Name = "FrameBracket_" .. index,
+			Size = Vector3.new(0.75, 0.55, 0.75),
+			CFrame = CFrame.new(cornerPos + Vector3.new(0, 0.3, 0)),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = trap,
+		})
+
+		for boltIndex = 1, 2 do
+			local boltRight = boltIndex == 1 and 0.22 or -0.22
+			local boltForward = boltIndex == 1 and -0.22 or 0.22
+
+			newPart({
+				Name = "FrameBolt_" .. index .. "_" .. boltIndex,
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(0.22, 0.24, 0.24),
+				CFrame = CFrame.new(cornerPos + right * boltRight + forward * boltForward + Vector3.new(0, 0.62, 0))
+					* CFrame.Angles(0, 0, math.rad(90)),
+				Material = CONFIG.materials.metal,
+				Color = CONFIG.colors.metal,
+				Parent = trap,
+			})
+		end
+	end
+
+	local railHeight = t.pitDepth + t.extendOffsetY + 0.6
+	local railInset = 0.55
+	local railCorners = {
+		floorPosition - right * (t.width / 2 - railInset) - forward * (t.depth / 2 - railInset),
+		floorPosition + right * (t.width / 2 - railInset) - forward * (t.depth / 2 - railInset),
+		floorPosition - right * (t.width / 2 - railInset) + forward * (t.depth / 2 - railInset),
+		floorPosition + right * (t.width / 2 - railInset) + forward * (t.depth / 2 - railInset),
+	}
+
+	for index, cornerPos in ipairs(railCorners) do
+		newPart({
+			Name = "GuideRail_" .. index,
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(railHeight, 0.22, 0.22),
+			CFrame = CFrame.new(cornerPos + Vector3.new(0, railHeight / 2 - t.pitDepth, 0))
+				* CFrame.Angles(0, 0, math.rad(90)),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = trap,
+		})
+	end
+
+	local springInset = railInset + 0.85
+	local springCorners = {
+		floorPosition - right * (t.width / 2 - springInset) - forward * (t.depth / 2 - springInset),
+		floorPosition + right * (t.width / 2 - springInset) - forward * (t.depth / 2 - springInset),
+		floorPosition - right * (t.width / 2 - springInset) + forward * (t.depth / 2 - springInset),
+		floorPosition + right * (t.width / 2 - springInset) + forward * (t.depth / 2 - springInset),
+	}
+
+	for cornerIndex, cornerPos in ipairs(springCorners) do
+		for coil = 1, t.springCoils do
+			local coilY = -t.pitDepth + 0.3 + (coil - 1) * 0.34
+
+			newPart({
+				Name = "Spring_" .. cornerIndex .. "_Coil" .. coil,
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(0.16, 0.85, 0.85),
+				CFrame = CFrame.new(cornerPos + Vector3.new(0, coilY, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+				Material = CONFIG.materials.metal,
+				Color = CONFIG.colors.spring,
+				Parent = trap,
+			})
+		end
+	end
+
+	local supportY = -t.pitDepth - 0.05
+	local diagLength = math.sqrt(t.width ^ 2 + t.depth ^ 2) * 0.88
+
+	addOrientedPart(trap, "SupportBrace1", Vector3.new(diagLength, 0.3, 0.5),
+		floorPosition + Vector3.new(0, supportY, 0), unitXZ(right + forward),
+		CONFIG.materials.metal, CONFIG.colors.metal)
+
+	addOrientedPart(trap, "SupportBrace2", Vector3.new(diagLength, 0.3, 0.5),
+		floorPosition + Vector3.new(0, supportY, 0), unitXZ(right - forward),
+		CONFIG.materials.metal, CONFIG.colors.metal)
+
+	local plankSpan = (t.depth - t.plankGap * (t.plankCount - 1)) / t.plankCount
+	local plankOffsets = {}
+
+	for plankIndex = 0, t.plankCount - 1 do
+		local plankOffset = -t.depth / 2 + plankSpan / 2 + plankIndex * (plankSpan + t.plankGap)
+		plankOffsets[plankIndex + 1] = plankOffset
+
+		addOrientedPart(trap, "Plank_" .. (plankIndex + 1), Vector3.new(t.width, 0.5, plankSpan),
+			floorPosition + forward * plankOffset, forward, CONFIG.materials.wood, CONFIG.colors.wood)
+	end
+
+	----------------------------------------------------------------
+	-- Moving spike bed: rows align exactly with the gaps between
+	-- planks so the extended spikes rise between them, never through
+	-- solid wood. This model is what SpikeTrapModule will animate.
+	----------------------------------------------------------------
+	local spikeBed = Instance.new("Model")
+	spikeBed.Name = "SpikeBed"
+	spikeBed.Parent = trap
+
+	local bedPlate = newPart({
+		Name = "BedPlate",
+		Size = Vector3.new(t.width - 1, 0.3, t.depth - 1),
+		CFrame = orientedCFrame(floorPosition + Vector3.new(0, t.restOffsetY, 0), forward),
+		Material = CONFIG.materials.spikeSteel,
+		Color = CONFIG.colors.spikeSteel,
+		Parent = spikeBed,
+	})
+
+	spikeBed.PrimaryPart = bedPlate
+
+	local colSpacing = t.width / (t.spikeCols + 1)
+
+	for col = 1, t.spikeCols do
+		local localRight = -t.width / 2 + colSpacing * col
+
+		for row = 1, #plankOffsets - 1 do
+			local localForward = (plankOffsets[row] + plankOffsets[row + 1]) / 2
+
+			local spikeBase = floorPosition
+				+ right * localRight
+				+ forward * localForward
+				+ Vector3.new(0, t.restOffsetY + 0.15, 0)
+
+			local segHeight = t.spikeHeight / t.spikeSegments
+
+			for seg = 1, t.spikeSegments do
+				local segRadius = t.spikeBaseRadius * (1 - (seg - 1) / t.spikeSegments)
+				local nextRadius = t.spikeBaseRadius * (1 - seg / t.spikeSegments)
+				local segRadiusAvg = math.max((segRadius + nextRadius) / 2, 0.03)
+
+				newPart({
+					Name = string.format("Spike_%d_%d_Seg%d", col, row, seg),
+					Shape = Enum.PartType.Cylinder,
+					Size = Vector3.new(segHeight + 0.06, segRadiusAvg * 2, segRadiusAvg * 2),
+					CFrame = CFrame.new(spikeBase + Vector3.new(0, segHeight * (seg - 0.5), 0))
+						* CFrame.Angles(0, 0, math.rad(90)),
+					Material = CONFIG.materials.spikeSteel,
+					Color = CONFIG.colors.spikeSteel,
+					Parent = spikeBed,
+				})
+			end
+		end
+	end
+
+	trap:SetAttribute("Kind", "SpikeTrap")
+	trap:SetAttribute("CycleSeconds", t.cycleSeconds)
+	trap:SetAttribute("Damage", t.damage)
+	trap:SetAttribute("RestOffsetY", t.restOffsetY)
+	trap:SetAttribute("ExtendOffsetY", t.extendOffsetY)
+
+	CollectionService:AddTag(trap, "SpikeTrap")
+
+	return trap
+end
+
+local function buildSwingingBlade(parent, name, pivotPosition, forward)
+	local b = CONFIG.swingingBlade
+	local blade = Instance.new("Model")
+	blade.Name = name
+	blade.Parent = parent
+
+	----------------------------------------------------------------
+	-- Ceiling mounting: two support posts and an axle, not a single
+	-- floating pivot. A short chain adds suspension detail above it.
+	----------------------------------------------------------------
+	local postForwardOffset = b.axleLength / 2
+
+	for _, side in ipairs({ -1, 1 }) do
+		local postTop = pivotPosition + forward * (postForwardOffset * side) + Vector3.new(0, b.mountDrop, 0)
+		local postBottom = pivotPosition + forward * (postForwardOffset * side)
+
+		newPart({
+			Name = "SupportPost_" .. (side > 0 and "Front" or "Back"),
+			Size = Vector3.new(0.55, b.mountDrop, 0.55),
+			CFrame = CFrame.new((postTop + postBottom) / 2),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = blade,
+		})
+
+		newPart({
+			Name = "MountPlate_" .. (side > 0 and "Front" or "Back"),
+			Size = Vector3.new(1.1, 0.3, 1.1),
+			CFrame = CFrame.new(postTop + Vector3.new(0, -0.1, 0)),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = blade,
+		})
+	end
+
+	newPart({
+		Name = "Axle",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(b.axleLength + 0.6, 0.3, 0.3),
+		CFrame = horizontalAxisCFrame(pivotPosition, forward),
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = blade,
+	})
+
+	for linkIndex = 1, b.chainLinks do
+		local linkY = pivotPosition.Y + 0.5 + (linkIndex - 1) * 0.55
+
+		newPart({
+			Name = "ChainLink_" .. linkIndex,
+			Size = linkIndex % 2 == 0 and Vector3.new(0.55, 0.5, 0.22) or Vector3.new(0.22, 0.5, 0.55),
+			CFrame = CFrame.new(pivotPosition.X, linkY, pivotPosition.Z),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = blade,
+		})
+	end
+
+	----------------------------------------------------------------
+	-- Pivot + swinging arm assembly, parented under `pivot` so a
+	-- future module can rotate the whole thing rigidly with one
+	-- PivotTo call, around the axle (the `forward` axis) at rest.
+	----------------------------------------------------------------
+	local pivot = Instance.new("Model")
+	pivot.Name = "Pivot"
+	pivot.Parent = blade
+
+	local pivotHub = newPart({
+		Name = "PivotHub",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(1.1, 1.1, 1.1),
+		CFrame = CFrame.new(pivotPosition),
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = pivot,
+	})
+
+	pivot.PrimaryPart = pivotHub
+
+	local bladeCenter = pivotPosition - Vector3.new(0, b.armLength, 0)
+
+	newPart({
+		Name = "Arm",
+		Size = Vector3.new(0.4, b.armLength, 0.4),
+		CFrame = CFrame.new((pivotPosition + bladeCenter) / 2),
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = pivot,
+	})
+
+	local bladeAxis = horizontalAxisCFrame(bladeCenter, forward)
+
+	newPart({
+		Name = "BladeHub",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.65, 1.7, 1.7),
+		CFrame = bladeAxis,
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = pivot,
+	})
+
+	newPart({
+		Name = "BladeDisc",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.35, b.bladeRadius * 2, b.bladeRadius * 2),
+		CFrame = bladeAxis,
+		Material = CONFIG.materials.spikeSteel,
+		Color = CONFIG.colors.spikeSteel,
+		Parent = pivot,
+	})
+
+	-- Serrated rim so the disc silhouettes as a blade, not a plain disc.
+	for toothIndex = 0, 15 do
+		local toothAngle = math.rad(toothIndex * 22.5)
+
+		newPart({
+			Name = "BladeTooth_" .. toothIndex,
+			Size = Vector3.new(0.3, 0.5, 0.42),
+			CFrame = bladeAxis * CFrame.Angles(toothAngle, 0, 0) * CFrame.new(0, b.bladeRadius - 0.1, 0),
+			Material = CONFIG.materials.spikeSteel,
+			Color = CONFIG.colors.spikeSteel,
+			Parent = pivot,
+		})
+	end
+
+	-- Counterweight: a short stub on the opposite side of the pivot
+	-- from the blade, rigidly attached so it swings with the assembly.
+	local counterCenter = pivotPosition + Vector3.new(0, b.counterArmLength, 0)
+
+	newPart({
+		Name = "CounterArm",
+		Size = Vector3.new(0.32, b.counterArmLength, 0.32),
+		CFrame = CFrame.new((pivotPosition + counterCenter) / 2),
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = pivot,
+	})
+
+	newPart({
+		Name = "Counterweight",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(b.counterweightRadius * 2, b.counterweightRadius * 2, b.counterweightRadius * 2),
+		CFrame = CFrame.new(counterCenter),
+		Material = CONFIG.materials.spikeSteel,
+		Color = CONFIG.colors.counterweight,
+		Parent = pivot,
+	})
+
+	blade:SetAttribute("Kind", "SwingingBlade")
+	blade:SetAttribute("SwingAxis", forward)
+	blade:SetAttribute("SwingDegrees", b.swingDegrees)
+	blade:SetAttribute("PeriodSeconds", b.periodSeconds)
+	blade:SetAttribute("Damage", b.damage)
+
+	CollectionService:AddTag(blade, "SwingingBlade")
+
+	return blade
+end
+
+-- Ancient stone portcullis: jambs, guide tracks, a heavy lintel, twin
+-- counterweight housings, and a real barred leaf (vertical bars with
+-- spiked feet + horizontal cross bars) hanging raised at rest. A future
+-- gate module lowers the leaf between OpenOffsetY and ClosedOffsetY.
+local function buildPortcullisDoor(parent, name, floorPosition, forward, doorWidth, roomHeight)
+	local right = getRight(forward)
+	local d = CONFIG.portcullis
+	local assembly = newFolder(parent, name)
+	local trackInset = doorWidth / 2 + 0.5
+	local trackHeight = roomHeight - 0.5
+
+	for _, side in ipairs({ -1, 1 }) do
+		local sideName = side < 0 and "Left" or "Right"
+
+		addOrientedPart(assembly, "Jamb" .. sideName, Vector3.new(1.6, trackHeight, 2.2),
+			floorPosition + right * (trackInset * side) + Vector3.new(0, trackHeight / 2, 0),
+			forward, CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+		addOrientedPart(assembly, "Track" .. sideName, Vector3.new(0.4, trackHeight, 0.6),
+			floorPosition + right * ((trackInset - 0.9) * side) + Vector3.new(0, trackHeight / 2, 0),
+			forward, CONFIG.materials.metal, CONFIG.colors.metal)
+	end
+
+	addOrientedPart(assembly, "Lintel", Vector3.new(doorWidth + 3.6, 2.2, 2.6),
+		floorPosition + Vector3.new(0, roomHeight - 1.1, 0),
+		forward, CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+	for _, side in ipairs({ -1, 1 }) do
+		local sideName = side < 0 and "Left" or "Right"
+		local housingCenter = floorPosition + right * (trackInset * side) + Vector3.new(0, roomHeight - 2.0, 0)
+
+		addOrientedPart(assembly, "CounterHousing" .. sideName, Vector3.new(1.9, 2.6, 2.4),
+			housingCenter, forward, CONFIG.materials.wall, CONFIG.colors.wall)
+
+		newPart({
+			Name = "CounterWeight" .. sideName,
+			Size = Vector3.new(1.0, 1.0, 1.0),
+			CFrame = CFrame.new(housingCenter + Vector3.new(0, -0.4, 0)),
+			Material = CONFIG.materials.spikeSteel,
+			Color = CONFIG.colors.counterweight,
+			Parent = assembly,
+		})
+	end
+
+	----------------------------------------------------------------
+	-- The leaf: a real barred grille, raised near the top of the
+	-- doorway at rest (as a real portcullis hangs when open -- it
+	-- doesn't vanish, it hangs clear of the floor with teeth showing).
+	----------------------------------------------------------------
+	local leaf = Instance.new("Model")
+	leaf.Name = "Leaf"
+	leaf.Parent = assembly
+
+	local leafHeight = roomHeight * d.leafHeightRatio
+	local leafWidth = doorWidth - 0.6
+	local openCenterY = roomHeight - leafHeight / 2 - 0.4
+	local closedCenterY = leafHeight / 2 + 0.1
+	local leafCenter = floorPosition + Vector3.new(0, openCenterY, 0)
+
+	local barSpacing = leafWidth / (d.verticalBars + 1)
+	local primaryBar = nil
+
+	for barIndex = 1, d.verticalBars do
+		local barRight = -leafWidth / 2 + barSpacing * barIndex
+
+		local bar = addOrientedPart(leaf, "VerticalBar_" .. barIndex, Vector3.new(0.4, leafHeight - 0.8, 0.4),
+			leafCenter + right * barRight + Vector3.new(0, -0.4, 0), forward,
+			CONFIG.materials.metal, CONFIG.colors.metal)
+
+		primaryBar = primaryBar or bar
+
+		local segHeight = 0.9 / 3
+
+		for seg = 1, 3 do
+			local segRadiusAvg = math.max(0.24 * (1 - (seg - 1) / 3), 0.03)
+
+			newPart({
+				Name = string.format("BarSpike_%d_%d", barIndex, seg),
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(segHeight + 0.05, segRadiusAvg * 2, segRadiusAvg * 2),
+				CFrame = CFrame.new(leafCenter + right * barRight
+					+ Vector3.new(0, -leafHeight / 2 + segHeight * (seg - 0.5), 0))
+					* CFrame.Angles(0, 0, math.rad(90)),
+				Material = CONFIG.materials.spikeSteel,
+				Color = CONFIG.colors.spikeSteel,
+				Parent = leaf,
+			})
+		end
+	end
+
+	for crossIndex = 1, d.horizontalBars do
+		local crossY = -leafHeight / 2 + (leafHeight / (d.horizontalBars + 1)) * crossIndex
+
+		addOrientedPart(leaf, "CrossBar_" .. crossIndex, Vector3.new(leafWidth, 0.35, 0.35),
+			leafCenter + Vector3.new(0, crossY, 0), forward,
+			CONFIG.materials.metal, CONFIG.colors.metal)
+	end
+
+	leaf.PrimaryPart = primaryBar
+
+	assembly:SetAttribute("Kind", "SealingDoor")
+	assembly:SetAttribute("OpenOffsetY", openCenterY)
+	assembly:SetAttribute("ClosedOffsetY", closedCenterY)
+	assembly:SetAttribute("TriggerType", "CrossDistance")
+
+	CollectionService:AddTag(assembly, "SealingDoor")
+
+	return assembly
+end
+
+----------------------------------------------------------------------
+-- ROOM A: ENVIRONMENTAL STORYTELLING
+----------------------------------------------------------------------
+-- Pure set-dressing: nothing here is tagged or scripted. It exists so
+-- the hall reads as a real, ancient, deadly place rather than a clean
+-- test corridor -- cave-ins, broken supports, cracked floors, warning
+-- carvings, and the remains of a trial-taker who didn't make it.
+
+local function addCollapsedMasonry(parent, name, centerPosition, chunkCount, spreadRadius)
+	local pile = newFolder(parent, name)
+
+	for index = 1, chunkCount do
+		local angle = random:NextNumber() * math.pi * 2
+		local distance = random:NextNumber() * spreadRadius
+		local size = 1.4 + random:NextNumber() * 2.2
+
+		local offset = Vector3.new(math.cos(angle) * distance, size * 0.3, math.sin(angle) * distance)
+
+		newPart({
+			Name = "Block_" .. index,
+			Size = Vector3.new(size, size * 0.65, size * 0.85),
+			CFrame = CFrame.new(centerPosition + offset) * CFrame.Angles(
+				random:NextNumber() * 0.5, random:NextNumber() * math.pi, random:NextNumber() * 0.5),
+			Material = CONFIG.materials.wall,
+			Color = CONFIG.colors.ancientStone,
+			Parent = pile,
+		})
+	end
+
+	return pile
+end
+
+local function addBrokenSupport(parent, name, basePosition, forward, fullHeight, breakHeight)
+	local support = newFolder(parent, name)
+
+	addOrientedPart(support, "Stub", Vector3.new(1.8, breakHeight, 1.8),
+		basePosition + Vector3.new(0, breakHeight / 2, 0), forward,
+		CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+	local fallenLength = fullHeight - breakHeight
+
+	newPart({
+		Name = "FallenSection",
+		Size = Vector3.new(1.8, 1.8, fallenLength),
+		CFrame = CFrame.new(basePosition + forward * (1.2 + fallenLength / 2) + Vector3.new(0, 0.9, 0))
+			* CFrame.Angles(0, 0, math.rad(7)),
+		Material = CONFIG.materials.wall,
+		Color = CONFIG.colors.ancientStone,
+		Parent = support,
+	})
+
+	return support
+end
+
+local function addCrackedFloorPatch(parent, name, centerPosition, forward, patchWidth, patchDepth)
+	local right = getRight(forward)
+	local patch = newFolder(parent, name)
+
+	for _, side in ipairs({ -1, 1 }) do
+		addOrientedPart(patch, "Slab_" .. (side > 0 and "A" or "B"),
+			Vector3.new(patchWidth / 2 - 0.15, 0.35, patchDepth),
+			centerPosition + right * (side * (patchWidth / 4 + 0.08)) + Vector3.new(0, -0.08, 0),
+			forward, CONFIG.materials.floor, CONFIG.colors.ancientStone)
+	end
+
+	for chip = 1, 5 do
+		local chipRight = (random:NextNumber() - 0.5) * (patchWidth * 0.5)
+		local chipForward = (random:NextNumber() - 0.5) * patchDepth
+
+		newPart({
+			Name = "Chip_" .. chip,
+			Size = Vector3.new(0.5 + random:NextNumber() * 0.5, 0.2, 0.5 + random:NextNumber() * 0.5),
+			CFrame = CFrame.new(centerPosition + right * chipRight + forward * chipForward + Vector3.new(0, 0.05, 0))
+				* CFrame.Angles(0, random:NextNumber() * math.pi, 0),
+			Material = CONFIG.materials.floor,
+			Color = CONFIG.colors.rubble,
+			Parent = patch,
+		})
+	end
+
+	return patch
+end
+
+local function addWarningCarving(parent, name, wallFloorPosition, forward, mountHeight)
+	local carving = newFolder(parent, name)
+
+	local panel = addOrientedPart(carving, "Panel", Vector3.new(2.6, 3.0, 0.35),
+		wallFloorPosition + forward * 0.25 + Vector3.new(0, mountHeight, 0),
+		forward, CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+	-- Abstract etched warning glyph -- a jagged angular mark carved
+	-- into the panel face, not literal text.
+	local glyphSegments = {
+		{ 0.9, math.rad(20) },
+		{ 0, math.rad(-20) },
+		{ -0.9, 0 },
+	}
+
+	for index, glyph in ipairs(glyphSegments) do
+		newPart({
+			Name = "Glyph_" .. index,
+			Size = Vector3.new(0.18, 1.1, 0.12),
+			CFrame = (panel.CFrame * CFrame.new(0, glyph[1], 0.28)) * CFrame.Angles(0, 0, glyph[2]),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.danger,
+			Parent = carving,
+		})
+	end
+
+	return carving
+end
+
+local function addSkeletalRemains(parent, name, centerPosition, forward)
+	local remains = newFolder(parent, name)
+	local right = getRight(forward)
+	local boneColor = Color3.fromRGB(196, 188, 168)
+
+	newPart({
+		Name = "Skull",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(0.9, 0.8, 0.85),
+		CFrame = CFrame.new(centerPosition + Vector3.new(0, 0.4, 0))
+			* CFrame.Angles(0, random:NextNumber() * math.pi * 2, 0),
+		Material = Enum.Material.SmoothPlastic,
+		Color = boneColor,
+		Parent = remains,
+	})
+
+	for rib = 1, 4 do
+		newPart({
+			Name = "Rib_" .. rib,
+			Size = Vector3.new(0.9, 0.15, 0.15),
+			CFrame = CFrame.new(centerPosition + forward * (0.3 + rib * 0.35) + Vector3.new(0, 0.15, 0))
+				* CFrame.Angles(0, math.rad(90), math.rad(15)),
+			Material = Enum.Material.SmoothPlastic,
+			Color = boneColor,
+			Parent = remains,
+		})
+	end
+
+	for limb = 1, 2 do
+		local limbRight = limb == 1 and 1 or -1
+
+		newPart({
+			Name = "Limb_" .. limb,
+			Size = Vector3.new(0.22, 0.22, 2.2),
+			CFrame = CFrame.new(centerPosition + right * (limbRight * 0.8) + forward * 1.6 + Vector3.new(0, 0.12, 0))
+				* CFrame.Angles(0, math.rad(limbRight * 25), 0),
+			Material = Enum.Material.SmoothPlastic,
+			Color = boneColor,
+			Parent = remains,
+		})
+	end
+
+	return remains
+end
+
+----------------------------------------------------------------------
+-- ROOM A: ADDITIONAL ARCHITECTURAL DETAIL
+----------------------------------------------------------------------
+-- Fills the long bare stretches between the existing set pieces above.
+-- Same rule as everything else in this file: cosmetic geometry proud
+-- of the wall, nothing here moves or resizes the room's actual floor,
+-- walls, traps, dividers, or blades.
+
+-- A shallow display niche proud of a wall: two side returns, a header,
+-- a sill, and a shadowed back panel, with a little settled debris on
+-- the sill. Reads as a recessed alcove without requiring the (thin)
+-- wall part itself to be cut into.
+local function addWallAlcove(parent, name, wallFloorPosition, forward, alcoveWidth, alcoveHeight, material, color)
+	local alcove = newFolder(parent, name)
+	local right = getRight(forward)
+	local depth = 1.1
+
+	addOrientedPart(alcove, "BackPanel", Vector3.new(alcoveWidth, alcoveHeight, 0.3),
+		wallFloorPosition + forward * (depth - 0.15) + Vector3.new(0, alcoveHeight / 2 + 0.4, 0),
+		forward, material, CONFIG.colors.ancientStone)
+
+	for _, side in ipairs({ -1, 1 }) do
+		addOrientedPart(alcove, "Return_" .. (side > 0 and "Right" or "Left"), Vector3.new(0.3, alcoveHeight, depth),
+			wallFloorPosition + right * (side * alcoveWidth / 2) + forward * (depth / 2) + Vector3.new(0, alcoveHeight / 2 + 0.4, 0),
+			forward, material, color)
+	end
+
+	addOrientedPart(alcove, "Header", Vector3.new(alcoveWidth + 0.5, 0.4, depth),
+		wallFloorPosition + forward * (depth / 2) + Vector3.new(0, alcoveHeight + 0.4, 0),
+		forward, material, color)
+
+	addOrientedPart(alcove, "Sill", Vector3.new(alcoveWidth + 0.3, 0.35, depth),
+		wallFloorPosition + forward * (depth / 2) + Vector3.new(0, 0.4, 0),
+		forward, material, color)
+
+	addRubblePile(alcove, "SillDebris", wallFloorPosition + forward * depth + Vector3.new(0, 0.55, 0), 3, 0.5)
+
+	return alcove
+end
+
+-- A partial blind arch proud of the wall: two full-height springer
+-- piers as if it still bears load, but only the near voussoirs survive
+-- -- the far side of the ring sheared off and lies as rubble below.
+-- Reuses the same arc math as buildArenaApproach's arch, just stopped
+-- partway around instead of completing the full sweep.
+local function addDamagedArch(parent, name, wallFloorPosition, forward, archWidth, wallHeight, material, color)
+	local arch = newFolder(parent, name)
+	local right = getRight(forward)
+
+	local halfWidth = archWidth / 2
+	local rise = archWidth * 0.32
+	local archRadius = (halfWidth ^ 2 + rise ^ 2) / (2 * rise)
+	local halfSweep = math.asin(math.min(halfWidth / archRadius, 1))
+	local springHeight = wallHeight * 0.42
+	local archCenter = wallFloorPosition + Vector3.new(0, springHeight, 0)
+
+	for _, side in ipairs({ -1, 1 }) do
+		addOrientedPart(arch, "Springer_" .. (side > 0 and "Right" or "Left"), Vector3.new(1.6, springHeight, 1.3),
+			wallFloorPosition + right * (side * (halfWidth + 0.5)) + forward * 0.5 + Vector3.new(0, springHeight / 2, 0),
+			forward, material, CONFIG.colors.ancientStone)
+	end
+
+	local voussoirCount = 7
+	local angleStep = (halfSweep * 2) / voussoirCount
+	local blockWidth = 2 * archRadius * math.sin(angleStep / 2) * 1.25
+	local breakIndex = math.floor(voussoirCount * 0.6)
+
+	for index = 0, breakIndex do
+		local angle = (math.pi / 2 - halfSweep) + angleStep * (index + 0.5)
+
+		local position = archCenter
+			+ right * (archRadius * math.cos(angle))
+			+ Vector3.new(0, archRadius * math.sin(angle), 0)
+
+		local tangent = right * -math.sin(angle) + Vector3.new(0, math.cos(angle), 0)
+		local radial = right * math.cos(angle) + Vector3.new(0, math.sin(angle), 0)
+
+		newPart({
+			Name = "Voussoir_" .. (index + 1),
+			Size = Vector3.new(blockWidth, 1.3, 1.1),
+			CFrame = CFrame.fromMatrix(position, tangent, radial),
+			Material = material,
+			Color = CONFIG.colors.ancientStone,
+			Parent = arch,
+		})
+	end
+
+	addCollapsedMasonry(arch, "ArchDebris", wallFloorPosition + right * (halfWidth * 0.6) + forward * 0.8, 4, 1.6)
+
+	return arch
+end
+
+-- A generic decorative relief distinct from the angular warning glyph
+-- (addWarningCarving above): a shallow circular medallion with
+-- radiating grooves, the kind of ornamental stonework that implies
+-- careful masons rather than a hazard marker.
+local function addAncientCarving(parent, name, wallFloorPosition, forward, mountHeight)
+	local carving = newFolder(parent, name)
+
+	addOrientedPart(carving, "Panel", Vector3.new(2.4, 2.4, 0.3),
+		wallFloorPosition + forward * 0.22 + Vector3.new(0, mountHeight, 0),
+		forward, CONFIG.materials.wall, CONFIG.colors.ancientStone)
+
+	local axis = horizontalAxisCFrame(wallFloorPosition + forward * 0.4 + Vector3.new(0, mountHeight, 0), forward)
+
+	newPart({
+		Name = "Rim",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.18, 1.9, 1.9),
+		CFrame = axis,
+		Material = CONFIG.materials.wall,
+		Color = CONFIG.colors.rubble,
+		Parent = carving,
+	})
+
+	for groove = 0, 5 do
+		local grooveAngle = math.rad(groove * 60)
+
+		newPart({
+			Name = "Groove_" .. groove,
+			Size = Vector3.new(0.2, 0.1, 0.85),
+			CFrame = axis * CFrame.Angles(grooveAngle, 0, 0) * CFrame.new(0, 0.55, 0),
+			Material = CONFIG.materials.wall,
+			Color = CONFIG.colors.rubble,
+			Parent = carving,
+		})
+	end
+
+	return carving
+end
+
+-- A dead, broken wall-torch mount: a bent bracket and a snapped stub,
+-- no wood stick or flame, with a scorch mark on the wall behind it.
+-- Sits alongside the still-lit torches from layWallTorches as evidence
+-- some fixtures never got repaired.
+local function addBrokenTorchMount(parent, name, wallFloorPosition, forward, mountHeight)
+	local mount = newFolder(parent, name)
+
+	addOrientedPart(mount, "Bracket", Vector3.new(0.6, 0.55, 1.2),
+		wallFloorPosition + forward * 0.3 + Vector3.new(0, mountHeight, 0),
+		forward, CONFIG.materials.metal, CONFIG.colors.metal)
+
+	newPart({
+		Name = "SnappedStub",
+		Size = Vector3.new(0.3, 0.7, 0.3),
+		CFrame = CFrame.new(wallFloorPosition + forward * 0.85 + Vector3.new(0, mountHeight + 0.55, 0))
+			* CFrame.Angles(0, 0, math.rad(35)),
+		Material = CONFIG.materials.torchWood,
+		Color = CONFIG.colors.torchWood,
+		Parent = mount,
+	})
+
+	newPart({
+		Name = "ScorchMark",
+		Size = Vector3.new(1.1, 1.4, 0.08),
+		CFrame = orientedCFrame(wallFloorPosition + forward * 0.06 + Vector3.new(0, mountHeight + 0.3, 0), forward),
+		Material = Enum.Material.SmoothPlastic,
+		Color = Color3.fromRGB(18, 17, 16),
+		Transparency = 0.35,
+		CanCollide = false,
+		CanQuery = false,
+		CastShadow = false,
+		Parent = mount,
+	})
+
+	return mount
+end
+
+-- A large slab that fell from the ceiling and now rests wedged at an
+-- angle against the wall, with smaller spall debris scattered from the
+-- fall. `wallSideRight` is +1 or -1, matching whichever wall it leans
+-- against.
+local function addFallenCeilingBlock(parent, name, floorPosition, forward, wallSideRight)
+	local block = newFolder(parent, name)
+	local right = getRight(forward)
+	local size = Vector3.new(3.4, 2.6, 3.0)
+
+	newPart({
+		Name = "Slab",
+		Size = size,
+		CFrame = CFrame.new(floorPosition + right * (wallSideRight * 1.4) + Vector3.new(0, size.Y * 0.4, 0))
+			* CFrame.Angles(math.rad(18) * wallSideRight, math.rad(12), math.rad(9) * wallSideRight),
+		Material = CONFIG.materials.wall,
+		Color = CONFIG.colors.ancientStone,
+		Parent = block,
+	})
+
+	addCollapsedMasonry(block, "SpallDebris", floorPosition + right * (wallSideRight * 2.6), 5, 2.0)
+
+	return block
+end
+
+-- A carved celestial medallion proud of a wall: a stone rim, an inner
+-- metal ring, eight radiating spokes, and a small fixed "star" at the
+-- center. Used in Room C to echo the orrery/armillary theme in the
+-- architecture itself rather than only in the centerpiece.
+local function addCelestialMedallion(parent, name, wallFloorPosition, forward, mountHeight)
+	local medallion = newFolder(parent, name)
+	local mountPosition = wallFloorPosition + Vector3.new(0, mountHeight, 0)
+	local axis = horizontalAxisCFrame(mountPosition + forward * 0.35, forward)
+
+	newPart({
+		Name = "Rim",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.3, 2.6, 2.6),
+		CFrame = axis,
+		Material = CONFIG.materials.trim,
+		Color = CONFIG.colors.trim,
+		Parent = medallion,
+	})
+
+	newPart({
+		Name = "InnerRing",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.32, 1.5, 1.5),
+		CFrame = axis,
+		Material = CONFIG.materials.metal,
+		Color = CONFIG.colors.metal,
+		Parent = medallion,
+	})
+
+	for spoke = 0, 7 do
+		local spokeAngle = math.rad(spoke * 45)
+
+		newPart({
+			Name = "Spoke_" .. spoke,
+			Size = Vector3.new(0.34, 0.12, 1.3),
+			CFrame = axis * CFrame.Angles(spokeAngle, 0, 0) * CFrame.new(0, 0.75, 0),
+			Material = CONFIG.materials.metal,
+			Color = CONFIG.colors.metal,
+			Parent = medallion,
+		})
+	end
+
+	local star = newPart({
+		Name = "CenterStar",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(0.5, 0.5, 0.5),
+		CFrame = CFrame.new(mountPosition + forward * 0.42),
+		Material = CONFIG.materials.neon,
+		Color = CONFIG.colors.star,
+		Transparency = 0.2,
+		CanCollide = false,
+		CanQuery = false,
+		CastShadow = false,
+		Parent = medallion,
+	})
+
+	addGlow(star, CONFIG.colors.star, 6, 1)
+
+	return medallion
+end
+
+----------------------------------------------------------------------
+-- ROOM A: SHADOWS
+----------------------------------------------------------------------
+
+local function buildRoomA(root, entrancePosition, forward)
+	local room = newFolder(root, "RoomA_Shadows")
+
+	local width = CONFIG.roomA.width
+	local height = CONFIG.roomA.height
+	local length = CONFIG.roomA.length
+	local right = getRight(forward)
+
+	addOrientedPart(
+		room,
+		"Floor",
+		Vector3.new(width, 1, length),
+		entrancePosition
+			+ forward * (length / 2)
+			+ Vector3.new(0, -0.5, 0),
+		forward,
+		CONFIG.materials.floor,
+		CONFIG.colors.floor
+	)
+
+	addOrientedPart(
+		room,
+		"Ceiling",
+		Vector3.new(width, 1, length),
+		entrancePosition
+			+ forward * (length / 2)
+			+ Vector3.new(0, height + 0.5, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		room,
+		"WallLeft",
+		Vector3.new(1, height, length),
+		entrancePosition
+			+ forward * (length / 2)
+		- right * (width / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		room,
+		"WallRight",
+		Vector3.new(1, height, length),
+		entrancePosition
+			+ forward * (length / 2)
+			+ right * (width / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		room,
+		"RoomA_ExitWall",
+		Vector3.new(width, height, 1),
+		entrancePosition
+			+ forward * length
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	-- Structural polish: trim, beams, torches, corner pilasters, rubble.
+	local leftWallOrigin = entrancePosition - right * (width / 2)
+	local rightWallOrigin = entrancePosition + right * (width / 2)
+
+	addCorniceBand(room, "WallLeft", leftWallOrigin, forward, length, height, CONFIG.materials.trim, CONFIG.colors.trim)
+	addCorniceBand(room, "WallRight", rightWallOrigin, forward, length, height, CONFIG.materials.trim, CONFIG.colors.trim)
+	addBaseboardBand(room, "WallLeft", leftWallOrigin, forward, length, CONFIG.materials.trim, CONFIG.colors.trim)
+	addBaseboardBand(room, "WallRight", rightWallOrigin, forward, length, CONFIG.materials.trim, CONFIG.colors.trim)
+
+	layCeilingBeams(room, "Beam", entrancePosition, forward, width, height, 0, length, CONFIG.materials.wall, CONFIG.colors.wall)
+	layWallTorches(room, "TorchLeft", leftWallOrigin, forward, right, 0, length)
+	layWallTorches(room, "TorchRight", rightWallOrigin, forward, -right, 0, length)
+
+	-- Corner pilasters at the four room corners (entrance and exit ends).
+	addPilaster(room, "CornerEntranceLeft", leftWallOrigin, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	addPilaster(room, "CornerEntranceRight", rightWallOrigin, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	addPilaster(room, "CornerExitLeft", leftWallOrigin + forward * length, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	addPilaster(room, "CornerExitRight", rightWallOrigin + forward * length, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+
+	-- Pilasters bracing each zigzag divider where it meets its side wall
+	-- (left divider lands on the left wall at 40 studs, right divider on
+	-- the right wall at 61 studs — see the divider placement below).
+	addPilaster(room, "DividerBraceLeft", leftWallOrigin + forward * 40, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	addPilaster(room, "DividerBraceRight", rightWallOrigin + forward * 61, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
+
+	addRubblePile(room, "RubbleNearEntrance", entrancePosition + forward * 6 - right * (width / 2 - 2.5), 6, 2.5)
+
+	-- Storytelling: a partial cave-in and a warning carving greet the
+	-- player before the first trap, and the remains of an earlier
+	-- trial-taker who didn't clear it are tucked against the wall.
+	addCollapsedMasonry(room, "CaveInNearEntrance", entrancePosition + forward * 7 + right * (width / 2 - 3), 5, 2.2)
+	addWarningCarving(room, "WarningCarving", leftWallOrigin + forward * 11, right, height * 0.55)
+	addSkeletalRemains(room, "FallenTrialTaker", entrancePosition + forward * 8 + right * (width / 2 - 2), forward)
+
+	-- Fill the long bare run past the first trap and before the broken
+	-- support: a display niche and a partial ruined arch on the right
+	-- wall, clear of the trap housing and the (left-wall) support.
+	addWallAlcove(room, "AlcoveNiche_1", rightWallOrigin + forward * 26, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
+	addDamagedArch(room, "DamagedArch_1", rightWallOrigin + forward * 35, -right, 4.5, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	addRubblePile(room, "DebrisScatter_1", entrancePosition + forward * 29 - right * (width / 2 - 2.5), 5, 2)
+
+	-- Stone-housed mechanical spike traps. Spaced clear of the zigzag
+	-- dividers (40, 61) so the housings never intersect them.
+	for index, distance in ipairs({ 18, 50, 75 }) do
+		buildSpikeTrap(room, "SpikeTrap_" .. index, entrancePosition + forward * distance, forward)
+	end
+
+	-- Ancient relief on the left wall, trailing off from Trap 1 toward
+	-- the broken support -- ordinary ornamental stonework, not another
+	-- warning.
+	addAncientCarving(room, "AncientCarving_1", leftWallOrigin + forward * 24, right, height * 0.5)
+
+	-- A support that gave way under the weight of the mechanisms above,
+	-- toppled to one side between the first two traps.
+	addBrokenSupport(room, "BrokenSupport", leftWallOrigin + forward * 31, forward, height, height * 0.4)
+
+	-- A dead torch in the narrow gap between Trap 2 and the second
+	-- divider -- nobody's replaced it since Trap 2 was reset last.
+	addBrokenTorchMount(room, "BrokenTorch_1", rightWallOrigin + forward * 58, -right, CONFIG.detail.torchHeight)
+
+	-- Zigzag walls: enough room for a dash around each side.
+	local dividerWidth = width * 0.62
+
+	addOrientedPart(
+		room,
+		"ZigzagDividerLeft",
+		Vector3.new(dividerWidth, height, 1.5),
+		entrancePosition
+			+ forward * 40
+		- right * (width / 2 - dividerWidth / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	addOrientedPart(
+		room,
+		"ZigzagDividerRight",
+		Vector3.new(dividerWidth, height, 1.5),
+		entrancePosition
+			+ forward * 61
+			+ right * (width / 2 - dividerWidth / 2)
+			+ Vector3.new(0, height / 2, 0),
+		forward,
+		CONFIG.materials.wall,
+		CONFIG.colors.wall
+	)
+
+	-- Past the second divider, before Trap 3 picks back up: a slab that
+	-- came down from the ceiling long ago, and a niche opposite it.
+	addFallenCeilingBlock(room, "FallenBlock_1", leftWallOrigin + forward * 65, forward, 1)
+	addWallAlcove(room, "AlcoveNiche_2", rightWallOrigin + forward * 66, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
+
+	-- Pendulum blades guard the gap each divider leaves open, so the
+	-- zigzag dash also has to be timed, not just aimed.
+	local blade1Right = dividerWidth / 2
+	local blade2Right = -dividerWidth / 2
+	local bladePivotY = height - CONFIG.swingingBlade.mountDrop
+
+	buildSwingingBlade(
+		room,
+		"SwingingBlade_1",
+		entrancePosition + forward * 40 + right * blade1Right + Vector3.new(0, bladePivotY, 0),
+		forward
+	)
+
+	buildSwingingBlade(
+		room,
+		"SwingingBlade_2",
+		entrancePosition + forward * 61 + right * blade2Right + Vector3.new(0, bladePivotY, 0),
+		forward
+	)
+
+	-- Third blade, centered, near the end of the hall as the final
+	-- dodge before the exit -- same config as the others (matches
+	-- style and speed), just placed after the last spike trap clears.
+	buildSwingingBlade(
+		room,
+		"SwingingBlade_3",
+		entrancePosition + forward * 84 + Vector3.new(0, bladePivotY, 0),
+		forward
+	)
+
+	-- Carving framing the final blade -- the last thing a player sees
+	-- before the timed dash to the door. The blade itself never reaches
+	-- the walls, so this can sit right at its distance with no clash.
+	addAncientCarving(room, "AncientCarving_2", leftWallOrigin + forward * 84, right, height * 0.5)
+
+	addRubblePile(room, "RubbleNearExit", entrancePosition + forward * 93 + right * (width / 2 - 2.5), 6, 2.5)
+	addCrackedFloorPatch(room, "CrackedFloorNearDoor", entrancePosition + forward * 85, forward, width - 4, 6)
+
+	-- Ancient stone portcullis sealing the exit.
+	buildPortcullisDoor(room, "ExitPortcullis", entrancePosition + forward * 88, forward, width - 1, height)
+
+	-- Beyond the gate: a dead torch and a final niche/arch pairing so
+	-- the last stretch to the exit wall doesn't read as an afterthought.
+	addBrokenTorchMount(room, "BrokenTorch_2", leftWallOrigin + forward * 92, right, CONFIG.detail.torchHeight)
+	addWallAlcove(room, "AlcoveNiche_3", rightWallOrigin + forward * 97, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
+	addDamagedArch(room, "DamagedArch_2", leftWallOrigin + forward * 98, right, 4.2, height, CONFIG.materials.wall, CONFIG.colors.wall)
+
+	return room
+end
+
+----------------------------------------------------------------------
+-- ARENA AND DOME HELPERS
+----------------------------------------------------------------------
+
+local function buildDome(parent, centerPosition, radius, wallHeight, domeHeight, segments, rings, material, color)
+	local dome = newFolder(parent, "Dome")
+
+	for ring = 0, rings - 1 do
+		local t0 = (ring / rings) * math.pi / 2
+		local t1 = ((ring + 1) / rings) * math.pi / 2
+
+		local radius0 = radius * math.cos(t0)
+		local radius1 = radius * math.cos(t1)
+
+		local height0 = wallHeight + domeHeight * math.sin(t0)
+		local height1 = wallHeight + domeHeight * math.sin(t1)
+
+		for segment = 0, segments - 1 do
+			local angle0 = (segment / segments) * math.pi * 2
+			local angle1 = ((segment + 1) / segments) * math.pi * 2
+
+			local pointA0 = centerPosition + Vector3.new(
+				math.cos(angle0) * radius0,
+				height0,
+				math.sin(angle0) * radius0
+			)
+
+			local pointB0 = centerPosition + Vector3.new(
+				math.cos(angle1) * radius0,
+				height0,
+				math.sin(angle1) * radius0
+			)
+
+			local pointA1 = centerPosition + Vector3.new(
+				math.cos(angle0) * radius1,
+				height1,
+				math.sin(angle0) * radius1
+			)
+
+			local pointB1 = centerPosition + Vector3.new(
+				math.cos(angle1) * radius1,
+				height1,
+				math.sin(angle1) * radius1
+			)
+
+			local mid0 = (pointA0 + pointB0) / 2
+			local mid1 = (pointA1 + pointB1) / 2
+			local panelCenter = (mid0 + mid1) / 2
+
+			local tangent = (pointB0 - pointA0).Unit
+			local slope = (mid1 - mid0).Unit
+			local normal = tangent:Cross(slope)
+
+			if normal.Magnitude < 0.001 then
+				normal = Vector3.new(0, 1, 0)
+			else
+				normal = normal.Unit
+			end
+
+			local panelWidth = (pointB0 - pointA0).Magnitude
+			local panelHeight = (mid1 - mid0).Magnitude
+
+			newPart({
+				Name = "DomePanel_" .. ring .. "_" .. segment,
+				Size = Vector3.new(panelWidth + 0.35, panelHeight + 0.35, 0.8),
+				CFrame = CFrame.fromMatrix(panelCenter, tangent, slope, normal),
+				Material = material,
+				Color = color,
+				Parent = dome,
+			})
+		end
+	end
+
+	return dome
+end
+
+local function buildArena(root, name, entrancePosition, forward, settings)
+	local arena = newFolder(root, name)
+
+	local radius = settings.radius
+	local wallHeight = settings.wallHeight
+	local segments = settings.wallSegments
+	local centerPosition = entrancePosition + forward * radius
+	local entryNormal = -forward
+
+	newPart({
+		Name = "Floor",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(1, radius * 2, radius * 2),
+		CFrame = CFrame.new(centerPosition + Vector3.new(0, -0.5, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		Material = CONFIG.materials.floor,
+		Color = CONFIG.colors.floor,
+		Parent = arena,
+	})
+
+	-- The doorway only needs to be as wide as the corridor plus a small
+	-- margin for the approach pilasters (see buildArenaApproach) -- not
+	-- a fixed fraction of the whole ring. Computing the angular
+	-- half-width from the real corridor width keeps the wall continuous
+	-- everywhere else, so the arena reads as one complete enclosed
+	-- cylinder with a doorway cut into it rather than a wide gap.
+	local doorwayHalfWidth = settings.doorwayHalfWidth or (CONFIG.corridor.width / 2 + 1)
+	local doorwayCosThreshold = math.cos(math.asin(math.min(doorwayHalfWidth / (radius - 1.5), 1)))
+
+	for segment = 0, segments - 1 do
+		local angle0 = (segment / segments) * math.pi * 2
+		local angle1 = ((segment + 1) / segments) * math.pi * 2
+		local midAngle = (angle0 + angle1) / 2
+
+		local normal = Vector3.new(
+			math.cos(midAngle),
+			0,
+			math.sin(midAngle)
+		)
+
+		-- Leave a doorway facing the hub.
+		if normal:Dot(entryNormal) < doorwayCosThreshold then
+			local pointA = centerPosition + Vector3.new(
+				math.cos(angle0) * (radius - 1.5),
+				0,
+				math.sin(angle0) * (radius - 1.5)
+			)
+
+			local pointB = centerPosition + Vector3.new(
+				math.cos(angle1) * (radius - 1.5),
+				0,
+				math.sin(angle1) * (radius - 1.5)
+			)
+
+			local segmentLength = (pointB - pointA).Magnitude
+
+			local segmentFloorPosition = (pointA + pointB) / 2
+
+			addOrientedPart(
+				arena,
+				"WallSegment_" .. (segment + 1),
+				Vector3.new(segmentLength + 0.45, wallHeight, 3),
+				segmentFloorPosition + Vector3.new(0, wallHeight / 2, 0),
+				normal,
+				settings.wallMaterial,
+				settings.wallColor
+			)
+
+			addCorniceBand(
+				arena,
+				"WallSegment_" .. (segment + 1),
+				segmentFloorPosition,
+				normal,
+				segmentLength,
+				wallHeight,
+				CONFIG.materials.trim,
+				CONFIG.colors.trim
+			)
+
+			addBaseboardBand(
+				arena,
+				"WallSegment_" .. (segment + 1),
+				segmentFloorPosition,
+				normal,
+				segmentLength,
+				CONFIG.materials.trim,
+				CONFIG.colors.trim
+			)
+
+			-- Buttress pilaster + torch every 4th segment, not every
+			-- segment, so the ring reads as evenly spaced supports
+			-- rather than a solid drum of columns.
+			if segment % 4 == 0 then
+				addPilaster(
+					arena,
+					"Buttress_" .. (segment + 1),
+					segmentFloorPosition,
+					normal,
+					wallHeight,
+					settings.wallMaterial,
+					settings.wallColor
+				)
+
+				addWallTorch(
+					arena,
+					"Torch_" .. (segment + 1),
+					segmentFloorPosition - normal * 1.6,
+					-normal,
+					CONFIG.detail.torchHeight
+				)
+			end
+		end
+	end
+
+	buildDoorFrame(
+		arena,
+		"EntranceFrame",
+		entrancePosition,
+		forward,
+		CONFIG.corridor.width,
+		wallHeight - 2,
+		settings.wallMaterial,
+		settings.wallColor
+	)
+
+	buildDome(
+		arena,
+		centerPosition,
+		radius - 1.5,
+		wallHeight,
+		settings.domeHeight,
+		segments,
+		settings.domeRings,
+		settings.domeMaterial,
+		settings.domeColor
+	)
+
+	addDomeCap(
+		arena,
+		centerPosition,
+		wallHeight,
+		settings.domeHeight,
+		settings.domeMaterial,
+		settings.domeColor
+	)
+
+	return arena, centerPosition
+end
+
+-- Dresses a corridor-to-arena threshold with hub-style heavy masonry --
+-- flanking pilasters, an impost band marking the springing line, and a
+-- shallow segmental voussoir arch -- so the arena reads as carved from
+-- the same structure as the hub rather than stuck on a hallway's end.
+-- Radius is derived from doorWidth/doorHeight so the crown clears the
+-- dome springline automatically; nothing here touches buildArena.
+local function buildArenaApproach(parent, entrancePosition, forward, doorWidth, doorHeight, material, color)
+	local right = getRight(forward)
+	local pilasterOffset = doorWidth / 2 + 1.1
+
+	addPilaster(parent, "ApproachPilasterLeft", entrancePosition - right * pilasterOffset, forward, doorHeight + 1, material, color)
+	addPilaster(parent, "ApproachPilasterRight", entrancePosition + right * pilasterOffset, forward, doorHeight + 1, material, color)
+
+	addOrientedPart(parent, "ApproachImpost", Vector3.new(doorWidth + 2.6, 0.6, 2.6),
+		entrancePosition + Vector3.new(0, doorHeight, 0), forward, material, color)
+
+	addOrientedPart(parent, "ApproachSill", Vector3.new(doorWidth + 1.4, 0.3, 1.8),
+		entrancePosition + Vector3.new(0, 0.05, 0), forward, material, color)
+
+	-- Shallow segmental arch: radius solved from the desired rise so the
+	-- crown clears comfortably under the dome springline (a full
+	-- semicircle would be far too tall for the available headroom).
+	local halfWidth = doorWidth / 2 + 1.4
+	local rise = 1.8
+	local archRadius = (halfWidth ^ 2 + rise ^ 2) / (2 * rise)
+	local halfSweep = math.asin(math.min(halfWidth / archRadius, 1))
+	local archCenter = entrancePosition + Vector3.new(0, doorHeight + rise - archRadius, 0)
+
+	local voussoirCount = 9
+	local angleStep = (halfSweep * 2) / voussoirCount
+	local blockWidth = 2 * archRadius * math.sin(angleStep / 2) * 1.3
+	local keystoneIndex = math.floor(voussoirCount / 2)
+
+	for index = 0, voussoirCount - 1 do
+		local angle = (math.pi / 2 - halfSweep) + angleStep * (index + 0.5)
+
+		local position = archCenter
+			+ right * (archRadius * math.cos(angle))
+			+ Vector3.new(0, archRadius * math.sin(angle), 0)
+
+		local tangent = right * -math.sin(angle) + Vector3.new(0, math.cos(angle), 0)
+		local radial = right * math.cos(angle) + Vector3.new(0, math.sin(angle), 0)
+		local isKeystone = index == keystoneIndex
+
+		newPart({
+			Name = isKeystone and "ApproachKeystone" or ("ApproachVoussoir_" .. (index + 1)),
+			Size = isKeystone
+				and Vector3.new(blockWidth * 1.2, 1.9, 2.9)
+				or Vector3.new(blockWidth, 1.5, 2.6),
+			CFrame = CFrame.fromMatrix(position, tangent, radial),
+			Material = material,
+			Color = color,
+			Parent = parent,
+		})
+	end
+end
+
+----------------------------------------------------------------------
+-- ROOM B: BLADES
+----------------------------------------------------------------------
+
+local function buildRoomB(root, entrancePosition, forward)
+	local settings = {
+		radius = CONFIG.roomB.radius,
+		wallHeight = CONFIG.roomB.wallHeight,
+		wallSegments = CONFIG.roomB.wallSegments,
+		domeHeight = CONFIG.roomB.domeHeight,
+		domeRings = 5,
+		wallMaterial = CONFIG.materials.wall,
+		wallColor = CONFIG.colors.wall,
+		domeMaterial = CONFIG.materials.dome,
+		domeColor = CONFIG.colors.domeB,
+		doorwayHalfWidth = CONFIG.corridor.width / 2 + 1.1,
+	}
+
+	local room, center = buildArena(
+		root,
+		"RoomB_Blades",
+		entrancePosition,
+		forward,
+		settings
+	)
+
+	-- Heavy stone approach tying the corridor into the arena -- this is
+	-- the "same structure as the hub" integration pass; every existing
+	-- arena feature below is untouched.
+	buildArenaApproach(
+		room,
+		entrancePosition,
+		forward,
+		CONFIG.corridor.width,
+		settings.wallHeight - 2,
+		settings.wallMaterial,
+		CONFIG.colors.ancientStone
+	)
+
+	newPart({
+		Name = "GolemDais",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(2, 24, 24),
+		CFrame = CFrame.new(center + Vector3.new(0, 1, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		Material = CONFIG.materials.floor,
+		Color = CONFIG.colors.floor,
+		Parent = room,
+	})
+
+	local golem = newFolder(room, "GolemPlaceholder")
+
+	local parts = {
+		{
+			name = "Legs",
+			size = Vector3.new(4, 3, 3),
+			offset = Vector3.new(0, 3.5, 0),
+		},
+		{
+			name = "Torso",
+			size = Vector3.new(5, 4, 3.5),
+			offset = Vector3.new(0, 7, 0),
+		},
+		{
+			name = "Head",
+			size = Vector3.new(2, 2, 2),
+			offset = Vector3.new(0, 10, 0),
+		},
+	}
+
+	for _, partInfo in ipairs(parts) do
+		newPart({
+			Name = partInfo.name,
+			Size = partInfo.size,
+			CFrame = CFrame.new(center + partInfo.offset),
+			Material = CONFIG.materials.rubble,
+			Color = CONFIG.colors.statue,
+			Parent = golem,
+		})
+	end
+
+	local coreOffsets = {
+		Vector3.new(0, 7, -2),
+		Vector3.new(-2.7, 7, 0),
+		Vector3.new(2.7, 7, 0),
+	}
+
+	for index, offset in ipairs(coreOffsets) do
+		local core = newPart({
+			Name = "Core" .. index,
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(1.2, 1.2, 1.2),
+			CFrame = CFrame.new(center + offset),
+			Material = CONFIG.materials.neon,
+			Color = CONFIG.colors.crystal,
+			CanCollide = false,
+			CanQuery = false,
+			Parent = golem,
+		})
+
+		addGlow(core, CONFIG.colors.crystal, 10, 2)
+	end
+
+	for index = 0, 7 do
+		local angle = math.rad(index * 45)
+		local position = center + Vector3.new(
+			math.cos(angle) * 27,
+			0,
+			math.sin(angle) * 27
+		)
+
+		newPart({
+			Name = "Statue_" .. (index + 1),
+			Size = Vector3.new(2.5, 7, 2.5),
+			CFrame = CFrame.new(position + Vector3.new(0, 3.5, 0)),
+			Material = Enum.Material.Concrete,
+			Color = CONFIG.colors.statue,
+			Parent = room,
+		})
+	end
+
+	return room
+end
+
+----------------------------------------------------------------------
+-- ROOM C: ORRERY
+----------------------------------------------------------------------
+
+local function buildRoomC(root, entrancePosition, forward)
+	local settings = {
+		radius = CONFIG.roomC.radius,
+		wallHeight = CONFIG.roomC.wallHeight,
+		wallSegments = CONFIG.roomC.wallSegments,
+		domeHeight = CONFIG.roomC.domeHeight,
+		domeRings = 7,
+		wallMaterial = Enum.Material.Basalt,
+		wallColor = CONFIG.colors.wallC,
+		domeMaterial = Enum.Material.Basalt,
+		domeColor = CONFIG.colors.domeC,
+		doorwayHalfWidth = CONFIG.corridor.width / 2 + 1.1,
+	}
+
+	local room, center = buildArena(
+		root,
+		"RoomC_Orrery",
+		entrancePosition,
+		forward,
+		settings
+	)
+
+	-- Same stone approach Room B got: pilasters, an impost band, and a
+	-- voussoir arch tying the corridor into the sanctuary, so this room
+	-- doesn't read as a circular wall dropped at the end of a hallway.
+	buildArenaApproach(
+		room,
+		entrancePosition,
+		forward,
+		CONFIG.corridor.width,
+		settings.wallHeight - 2,
+		settings.wallMaterial,
+		CONFIG.colors.ancientStone
+	)
+
+	newPart({
+		Name = "HeartDais",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(2, 20, 20),
+		CFrame = CFrame.new(center + Vector3.new(0, 1, 0))
+			* CFrame.Angles(0, 0, math.rad(90)),
+		Material = CONFIG.materials.floor,
+		Color = CONFIG.colors.floor,
+		Parent = room,
+	})
+
+	-- Elevated tiered platform: a wide ancient-stone base step and a
+	-- narrower crown step above the existing dais, turning the flat
+	-- disc into a proper stepped altar the Heart rises out of.
+	local daisTiers = {
+		{ radius = 15, height = 0.6, y = 0.3, material = CONFIG.materials.wall, color = CONFIG.colors.ancientStone },
+		{ radius = 12.5, height = 0.5, y = 0.85, material = CONFIG.materials.trim, color = CONFIG.colors.trim },
+		{ radius = 5, height = 0.7, y = 2.35, material = CONFIG.materials.trim, color = CONFIG.colors.trim },
+	}
+
+	for index, tier in ipairs(daisTiers) do
+		newPart({
+			Name = "DaisTier_" .. index,
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(tier.height, tier.radius * 2, tier.radius * 2),
+			CFrame = CFrame.new(center + Vector3.new(0, tier.y, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+			Material = tier.material,
+			Color = tier.color,
+			Parent = room,
+		})
+	end
+
+	local heart = newPart({
+		Name = "CrystalHeart",
+		Size = Vector3.new(3, 5, 3),
+		CFrame = CFrame.new(center + Vector3.new(0, 5, 0))
+			* CFrame.Angles(math.rad(45), math.rad(45), 0),
+		Material = CONFIG.materials.neon,
+		Color = CONFIG.colors.crystal,
+		CanCollide = false,
+		CanQuery = false,
+		Parent = room,
+	})
+
+	addGlow(heart, CONFIG.colors.crystal, 30, 3)
+
+	for index = 1, 6 do
+		local angle = math.rad((index / 6) * 360)
+		local mote = newPart({
+			Name = "MotePlaceholder_" .. index,
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(1.2, 1.2, 1.2),
+			CFrame = CFrame.new(
+				center + Vector3.new(
+					math.cos(angle) * 12,
+					5,
+					math.sin(angle) * 12
+				)
+			),
+			Material = CONFIG.materials.neon,
+			Color = CONFIG.colors.portal,
+			Transparency = 0.15,
+			CanCollide = false,
+			CanQuery = false,
+			Parent = room,
+		})
+
+		addGlow(mote, CONFIG.colors.portal, 8, 1.5)
+	end
+
+	for index = 1, 40 do
+		local theta = math.rad(5 + random:NextNumber() * 80)
+		local phi = math.rad(random:NextNumber() * 360)
+
+		local radius = math.max(
+			0,
+			(CONFIG.roomC.radius - 2) * math.cos(theta)
+		)
+
+		local height =
+			CONFIG.roomC.wallHeight
+			+ CONFIG.roomC.domeHeight * math.sin(theta)
+		- 0.3
+
+		newPart({
+			Name = "Star_" .. index,
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(0.35, 0.35, 0.35),
+			CFrame = CFrame.new(
+				center + Vector3.new(
+					math.cos(phi) * radius,
+					height,
+					math.sin(phi) * radius
+				)
+			),
+			Material = CONFIG.materials.neon,
+			Color = CONFIG.colors.star,
+			CanCollide = false,
+			CanQuery = false,
+			CastShadow = false,
+			Parent = room,
+		})
+	end
+
+	-- Armillary rings framing the Heart -- two intersecting metal rings
+	-- (reusing the room's existing metal/portal palette), sized inside
+	-- the motes' orbit so the composition reads as an inner mechanism
+	-- with the motes orbiting further out around it. Each ring is an
+	-- upper semicircle centered exactly on the Heart: every point sits
+	-- the same radius from its center (clear of the crystal by design)
+	-- and never dips below the Heart's own height, so it can't clip the
+	-- tiered dais below.
+	local function addCelestialArc(ringName, axisA, ringRadius, segments)
+		local ringCenter = center + Vector3.new(0, 5, 0)
+		local up = Vector3.new(0, 1, 0)
+
+		for index = 0, segments - 1 do
+			local angle0 = (index / segments) * math.pi
+			local angle1 = ((index + 1) / segments) * math.pi
+			local mid = (angle0 + angle1) / 2
+
+			local point0 = ringCenter + axisA * math.cos(angle0) * ringRadius + up * math.sin(angle0) * ringRadius
+			local point1 = ringCenter + axisA * math.cos(angle1) * ringRadius + up * math.sin(angle1) * ringRadius
+			local direction = point1 - point0
+			local midpoint = (point0 + point1) / 2
+			local radialOut = axisA * math.cos(mid) + up * math.sin(mid)
+
+			newPart({
+				Name = ringName .. "_" .. (index + 1),
+				Size = Vector3.new(0.4, 0.55, direction.Magnitude + 0.25),
+				CFrame = CFrame.lookAt(midpoint, midpoint + direction, radialOut),
+				Material = CONFIG.materials.metal,
+				Color = CONFIG.colors.metal,
+				CanCollide = false,
+				CanQuery = false,
+				Parent = room,
+			})
+		end
+	end
+
+	addCelestialArc("ArmillaryArcA", Vector3.new(1, 0, 0), 7, 14)
+	addCelestialArc("ArmillaryArcB", Vector3.new(0, 0, 1), 7, 14)
+
+	for _, offset in ipairs({
+		Vector3.new(7, 5, 0), Vector3.new(-7, 5, 0),
+		Vector3.new(0, 5, 7), Vector3.new(0, 5, -7),
+		}) do
+		local node = newPart({
+			Name = "RingNode",
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(0.7, 0.7, 0.7),
+			CFrame = CFrame.new(center + offset),
+			Material = CONFIG.materials.neon,
+			Color = CONFIG.colors.portal,
+			CanCollide = false,
+			CanQuery = false,
+			Parent = room,
+		})
+
+		addGlow(node, CONFIG.colors.portal, 8, 1.5)
+	end
+
+	-- Dome ribs continuing every buttress buildArena already placed (at
+	-- the same segment%4==0 positions) up the dome's curve to the apex
+	-- -- "additional supports" that tie directly into what's already
+	-- there instead of introducing a different building language.
+	for segment = 0, CONFIG.roomC.wallSegments - 1, 4 do
+		local midAngle = ((segment + 0.5) / CONFIG.roomC.wallSegments) * math.pi * 2
+		local radialXZ = Vector3.new(math.cos(midAngle), 0, math.sin(midAngle))
+		local previousPoint = nil
+
+		for ring = 0, settings.domeRings do
+			local t = (ring / settings.domeRings) * (math.pi / 2)
+			local ringRadius = (settings.radius - 1.5) * math.cos(t)
+			local ringHeight = settings.wallHeight + settings.domeHeight * math.sin(t)
+			local point = center + radialXZ * ringRadius + Vector3.new(0, ringHeight, 0)
+
+			if previousPoint then
+				local direction = point - previousPoint
+				local midpoint = (point + previousPoint) / 2
+
+				newPart({
+					Name = string.format("DomeRib_%d_Seg%d", segment + 1, ring),
+					Size = Vector3.new(1.0, 0.8, direction.Magnitude + 0.3),
+					CFrame = CFrame.lookAt(midpoint, midpoint + direction, radialXZ),
+					Material = settings.domeMaterial,
+					Color = settings.wallColor,
+					Parent = room,
+				})
+			end
+
+			previousPoint = point
+		end
+	end
+
+	-- Wall-level architecture to match: an engraved celestial medallion
+	-- above every buttress (the same segment%4==0 positions as the
+	-- buttresses and the dome ribs above), and a few shallow sanctuary
+	-- niches interleaved between them. Both skip the entrance opening
+	-- the same way buildArena's own wall loop does, so nothing ends up
+	-- floating in the doorway gap.
+	local entryNormal = -forward
+
+	for segment = 0, CONFIG.roomC.wallSegments - 1, 4 do
+		local midAngle = ((segment + 0.5) / CONFIG.roomC.wallSegments) * math.pi * 2
+		local normal = Vector3.new(math.cos(midAngle), 0, math.sin(midAngle))
+
+		if normal:Dot(entryNormal) < 0.86 then
+			local wallFloorPosition = center + normal * (settings.radius - 1.5)
+
+			addCelestialMedallion(room, "CelestialMedallion_" .. (segment + 1), wallFloorPosition, normal, 13)
+		end
+	end
+
+	for segment = 2, CONFIG.roomC.wallSegments - 1, 8 do
+		local midAngle = ((segment + 0.5) / CONFIG.roomC.wallSegments) * math.pi * 2
+		local normal = Vector3.new(math.cos(midAngle), 0, math.sin(midAngle))
+
+		if normal:Dot(entryNormal) < 0.86 then
+			local wallFloorPosition = center + normal * (settings.radius - 1.5)
+
+			addWallAlcove(room, "SanctuaryNiche_" .. (segment + 1), wallFloorPosition, normal, 2.6, 3.4, settings.wallMaterial, settings.wallColor)
+		end
+	end
+
+	return room
+end
+
+----------------------------------------------------------------------
+-- RUNTIME: SWINGING BLADE ANIMATION
+----------------------------------------------------------------------
+-- Swings every SwingingBlade-tagged model using the attributes already
+-- stamped on it in buildSwingingBlade (SwingAxis, SwingDegrees,
+-- PeriodSeconds): a plain sine-wave pendulum, slowest and heaviest at
+-- the ends of the swing exactly like a real suspended blade. Contact
+-- damage and hit detection stay out of scope here -- this only makes
+-- the blades move, which is the one piece the "future SpikeTrapModule"
+-- comments elsewhere in this file hadn't covered yet.
+--
+-- The pivot's PrimaryPart (PivotHub) sits exactly at the swing center,
+-- so its Position never drifts as the model rotates -- it's read fresh
+-- each frame instead of being cached, but it's the same value every
+-- time.
+
+local function animateSwingingBlades()
+	local startTime = os.clock()
+
+	RunService.Heartbeat:Connect(function()
+		local elapsed = os.clock() - startTime
+
+		for _, blade in ipairs(CollectionService:GetTagged("SwingingBlade")) do
+			local pivotModel = blade:FindFirstChild("Pivot")
+
+			if pivotModel and pivotModel.PrimaryPart then
+				local axis = blade:GetAttribute("SwingAxis")
+				local degrees = blade:GetAttribute("SwingDegrees")
+				local period = blade:GetAttribute("PeriodSeconds")
+
+				if axis and degrees and period and period > 0 then
+					local amplitude = math.rad(degrees)
+					local angle = amplitude * math.sin((elapsed / period) * (math.pi * 2))
+					local pivotPosition = pivotModel.PrimaryPart.Position
+
+					pivotModel:PivotTo(CFrame.new(pivotPosition) * CFrame.fromAxisAngle(axis, angle))
+				end
+			end
+		end
+	end)
+end
+
+----------------------------------------------------------------------
+-- MAIN BUILD
+----------------------------------------------------------------------
+
+local function main()
+	local oldDraft = Workspace:FindFirstChild("TrialChamberV2")
+
+	if oldDraft then
+		oldDraft:Destroy()
+	end
+
+	local originalFloorPosition = getExistingChamberFloorPosition()
+	local basePosition = originalFloorPosition + CONFIG.draftOffset
+
+	local root = Instance.new("Model")
+	root.Name = "TrialChamberV2"
+	root.Parent = Workspace
+
+	-- Matches the screenshot's three-branch arrangement:
+	-- Room A: lower-left, Room B: upper-left, Room C: upper-right.
+	local branches = {
+		{
+			name = "A",
+			forward = Vector3.new(-1, 0, 1).Unit,
+			roomName = "RoomA",
+		},
+		{
+			name = "B",
+			forward = Vector3.new(-1, 0, -1).Unit,
+			roomName = "RoomB",
+		},
+		{
+			name = "C",
+			forward = Vector3.new(1, 0, -1).Unit,
+			roomName = "RoomC",
+		},
+	}
+
+	buildCentralHub(root, basePosition, branches)
+
+	for _, branch in ipairs(branches) do
+		local corridorStart =
+			basePosition
+			+ branch.forward * (CONFIG.hub.radius - 1)
+
+		buildCorridor(
+			root,
+			"Hallway_" .. branch.roomName,
+			corridorStart,
+			branch.forward,
+			CONFIG.corridor.length
+		)
+
+		local roomEntrance =
+			corridorStart
+			+ branch.forward * CONFIG.corridor.length
+
+		if branch.name == "A" then
+			buildRoomA(root, roomEntrance, branch.forward)
+		elseif branch.name == "B" then
+			buildBarredGate(
+				root,
+				"RoomB_LockGate",
+				corridorStart + branch.forward * 5,
+				branch.forward,
+				CONFIG.corridor.width - 2,
+				CONFIG.corridor.height - 2
+			)
+
+			buildRoomB(root, roomEntrance, branch.forward)
+		elseif branch.name == "C" then
+			buildBarredGate(
+				root,
+				"RoomC_LockGate",
+				corridorStart + branch.forward * 5,
+				branch.forward,
+				CONFIG.corridor.width - 2,
+				CONFIG.corridor.height - 2
+			)
+
+			buildRoomC(root, roomEntrance, branch.forward)
+		end
+	end
+
+	print("[TrialChamberV2] Hub-and-spoke draft created safely.")
+	print("[TrialChamberV2] Original Workspace.TrialChamber was not changed.")
+end
+
+main()
+animateSwingingBlades()  
