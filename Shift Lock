@@ -1,0 +1,116 @@
+--[[
+	ShiftLockController.lua
+	--------------------------------------------------------
+	Custom "Shift Lock" camera for Roblox.
+
+	Behavior:
+	- Press LEFT SHIFT to toggle shift lock (matches Roblox's classic default).
+	- Also supports CTRL + SHIFT as a toggle combo, in case you specifically
+	  want that binding instead of/alongside plain Shift.
+	- While active: mouse is locked to the center of the screen, the camera
+	  goes over-the-shoulder, and the character faces the direction the
+	  camera is looking (classic third-person shooter style).
+	- Press again (or the bound keys again) to release.
+
+	SETUP:
+	1. Put this script in StarterPlayer > StarterPlayerScripts.
+	2. Make sure it's a LocalScript (not a Script/ModuleScript).
+	3. Done — no other setup required.
+--]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+-- ===== CONFIG =====
+local USE_PLAIN_SHIFT = true   -- LeftShift alone toggles shift lock (classic behavior)
+local USE_CTRL_SHIFT  = true   -- Ctrl+Shift combo also toggles shift lock
+local SHOULDER_OFFSET = Vector3.new(1.75, 0, 0) -- how far right the camera sits (over-the-shoulder)
+-- ===================
+
+local shiftLockEnabled = false
+local ctrlHeld = false
+
+local function setShiftLock(enabled)
+	shiftLockEnabled = enabled
+
+	if enabled then
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+		UserInputService.MouseIconEnabled = false
+	else
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+	end
+end
+
+local function toggleShiftLock()
+	setShiftLock(not shiftLockEnabled)
+end
+
+-- Track Ctrl key state (for the Ctrl+Shift combo)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	if input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.RightControl then
+		ctrlHeld = true
+	end
+
+	if input.KeyCode == Enum.KeyCode.LeftShift then
+		if USE_CTRL_SHIFT and ctrlHeld then
+			toggleShiftLock()
+		elseif USE_PLAIN_SHIFT then
+			toggleShiftLock()
+		end
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.RightControl then
+		ctrlHeld = false
+	end
+end)
+
+-- Keep the character facing the camera's look direction while shift-locked,
+-- and offset the camera to sit over the shoulder instead of dead-center.
+RunService.RenderStepped:Connect(function()
+	if not shiftLockEnabled then return end
+
+	local character = player.Character
+	if not character then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not rootPart then return end
+
+	-- Face the camera direction (only rotate around Y so we don't tilt the body)
+	local camCFrame = camera.CFrame
+	local lookVector = camCFrame.LookVector
+	local flatLook = Vector3.new(lookVector.X, 0, lookVector.Z)
+
+	if flatLook.Magnitude > 0 then
+		rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + flatLook)
+	end
+
+	-- Nudge the camera to an over-the-shoulder offset
+	camera.CFrame = camCFrame * CFrame.new(SHOULDER_OFFSET)
+
+	-- Prevent the default humanoid auto-rotate from fighting our facing direction
+	humanoid.AutoRotate = false
+end)
+
+-- Restore normal auto-rotate the moment shift lock turns off
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode ~= Enum.KeyCode.LeftShift then return end
+
+	if not shiftLockEnabled then
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.AutoRotate = true
+		end
+	end
+end)
