@@ -1,0 +1,108 @@
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+
+-- Configuration
+local SLIDE_SPEED = 55 
+local SLIDE_DURATION = 1.25 
+local SLIDE_COOLDOWN = 0.8
+local SLIDE_HIP_HEIGHT = 0.5
+
+local isSliding = false
+
+-- Get the slide key from ClientSettings or fallback to "C"
+local function getSlideKey()
+    local clientSettings = player:FindFirstChild("ClientSettings")
+    if clientSettings then
+        local slideValue = clientSettings:FindFirstChild("Slide")
+        if slideValue and slideValue:IsA("StringValue") then
+            return slideValue.Value
+        end
+    end
+    return "C"
+end
+
+-- Load the animation (only once)
+local slideAnimation = Instance.new("Animation")
+slideAnimation.AnimationId = "rbxassetid://79399137598319"
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or isSliding then return end
+
+    local slideKeyStr = getSlideKey()
+    local keyCode = Enum.KeyCode[slideKeyStr]
+    if not keyCode then
+        warn("Invalid slide key: " .. slideKeyStr)
+        return
+    end
+
+    if input.KeyCode == keyCode then
+        local character = player.Character
+        if not character then return end
+
+        local humanoid = character:FindFirstChild("Humanoid")
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+
+        if not humanoid or not hrp or humanoid.Health <= 0 then return end
+
+        -- Optional: require movement and ground contact
+        if humanoid.FloorMaterial == Enum.Material.Air or humanoid.MoveDirection.Magnitude == 0 then
+            return
+        end
+
+        isSliding = true
+
+        -- 1. Lower HipHeight (works for R15; for R6 you may want to scale the character)
+        local originalHipHeight = humanoid.HipHeight
+        humanoid.HipHeight = SLIDE_HIP_HEIGHT
+
+        -- 2. Play Animation
+        local animator = humanoid:FindFirstChild("Animator")
+        local slideTrack = nil
+        if animator then
+            slideTrack = animator:LoadAnimation(slideAnimation)
+            if slideTrack then
+                slideTrack:Play()
+            else
+                warn("Failed to load slide animation")
+            end
+        else
+            warn("Animator not found")
+        end
+
+        -- 3. Apply velocity
+        local slideAttachment = Instance.new("Attachment", hrp)
+        local linearVelocity = Instance.new("LinearVelocity", hrp)
+        linearVelocity.Attachment0 = slideAttachment
+        linearVelocity.ForceLimitMode = Enum.ForceLimitMode.PerAxis
+        linearVelocity.MaxAxesForce = Vector3.new(50000, 0, 50000)
+        local slideDir = humanoid.MoveDirection
+        linearVelocity.VectorVelocity = slideDir * SLIDE_SPEED
+
+        -- 4. Tween to zero over duration
+        local tween = TweenService:Create(linearVelocity, 
+            TweenInfo.new(SLIDE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { VectorVelocity = Vector3.zero }
+        )
+        tween:Play()
+
+        -- 5. Wait for slide to finish
+        task.wait(SLIDE_DURATION)
+
+        -- 6. Cleanup
+        linearVelocity:Destroy()
+        slideAttachment:Destroy()
+        humanoid.HipHeight = originalHipHeight
+
+        if slideTrack then
+            slideTrack:Stop()
+        end
+
+        -- 7. Cooldown
+        task.wait(SLIDE_COOLDOWN)
+        isSliding = false
+    end
+end)
+
