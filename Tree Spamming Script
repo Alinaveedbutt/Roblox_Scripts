@@ -1,0 +1,232 @@
+--[[
+	TreeSpawner.lua
+	--------------------------------------------------------
+	WHERE TO PUT THIS:
+	1. In the Explorer, find ServerScriptService.
+	2. Right-click it > Insert Object > Script (a REGULAR Script,
+	   NOT a LocalScript — this must run on the server).
+	3. Paste this code in, replacing everything that's there.
+	4. Rename it to "TreeSpawner" (optional but tidy).
+
+	BEFORE YOU PRESS PLAY:
+	1. You need a tree Model in ReplicatedStorage named exactly
+	   "PineTreeTemplate" (case-sensitive). If you don't have one yet,
+	   just insert any Roblox tree model there and rename it to that,
+	   or change TEMPLATE_NAME below to match whatever you have.
+	2. Click "Play" (not just look at the script) — spawning scripts
+	   only run when the game is actually running, not while editing.
+	3. Open the Output window: View tab > Output (or press Ctrl+Shift+O
+	   in some layouts). You'll see printed messages telling you exactly
+	   what happened.
+
+	WHY YOUR OLD VERSION PRINTED NOTHING:
+	This version raycasts against EVERYTHING in the workspace (baseplate,
+	parts, terrain — whatever you're standing on), not just Workspace.Terrain.
+	Your old one only ever hit actual Terrain voxels, so if you're using
+	a normal baseplate Part, every single raycast silently failed and
+	0 trees ever spawned — no errors, just nothing happening.
+--]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+-- ===== CONFIG =====
+local TEMPLATE_NAME = "PineTreeTemplate" -- must match the model's name in ReplicatedStorage exactly
+local TREE_COUNT = 300           -- how many trees to spawn total
+local MIN_DISTANCE = 12          -- minimum gap between trees (raise this if they overlap)
+local DELETE_EXISTING = true
+
+-- Spawn area: by default this AUTO-DETECTS the size of your ground so trees
+-- cover the whole map instead of one small circle. If you'd rather set it
+-- manually, change AUTO_DETECT_SIZE to false and set SPAWN_RADIUS yourself.
+local AUTO_DETECT_SIZE = true
+local SPAWN_RADIUS = 300         -- only used if AUTO_DETECT_SIZE is false
+local CENTER_X, CENTER_Z = 0, 0  -- only used if AUTO_DETECT_SIZE is false
+-- ==================
+
+print("========================================")
+print("TREE SPAWNER: script started running.")
+print("========================================")
+
+local template = ReplicatedStorage:FindFirstChild(TEMPLATE_NAME)
+if not template then
+	warn("STOPPED: No object named '" .. TEMPLATE_NAME .. "' found in ReplicatedStorage.")
+	warn("Fix: put your tree Model in ReplicatedStorage and name it exactly '" .. TEMPLATE_NAME .. "'.")
+	return
+end
+print("Found template: " .. template.Name .. " (" .. template.ClassName .. ")")
+
+if template.ClassName ~= "Model" then
+	warn("STOPPED: '" .. TEMPLATE_NAME .. "' must be a Model, not a " .. template.ClassName .. ".")
+	return
+end
+
+-- Folder to keep spawned trees organized
+local treeFolder = Workspace:FindFirstChild("Trees")
+if not treeFolder then
+	treeFolder = Instance.new("Folder")
+	treeFolder.Name = "Trees"
+	treeFolder.Parent = Workspace
+end
+
+if DELETE_EXISTING then
+	local deleted = 0
+	for _, obj in ipairs(treeFolder:GetChildren()) do
+		obj:Destroy()
+		deleted += 1
+	end
+	print("Cleared " .. deleted .. " old trees from the Trees folder.")
+end
+
+-- Work out the spawn area: either auto-detected from your ground, or fixed values above.
+local centerX, centerZ, spawnRadiusX, spawnRadiusZ
+
+-- Probe outward from the center with real raycasts to find where the ground
+-- actually ends (Terrain.MaxExtents is unreliable — it reports the theoretical
+-- max world size, not where you've actually sculpted/placed ground).
+local function probeGroundRadius(cx, cz)
+	local directions = {}
+	for angleDeg = 0, 315, 45 do
+		local rad = math.rad(angleDeg)
+		table.insert(directions, Vector3.new(math.cos(rad), 0, math.sin(rad)))
+	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = {}
+
+	local maxRadiusFound = 0
+	local STEP = 25
+	local MAX_STUDS = 4000 -- generous cap so we don't loop forever on huge maps
+
+	for _, dir in ipairs(directions) do
+		local lastHitDist = 0
+		local dist = STEP
+		while dist <= MAX_STUDS do
+			local x = cx + dir.X * dist
+			local z = cz + dir.Z * dist
+			local startPos = Vector3.new(x, 1000, z)
+			local result = Workspace:Raycast(startPos, Vector3.new(0, -2000, 0), rayParams)
+			if result then
+				lastHitDist = dist
+				dist += STEP
+			else
+				break -- ground ended in this direction
+			end
+		end
+		maxRadiusFound = math.max(maxRadiusFound, lastHitDist)
+	end
+
+	return maxRadiusFound
+end
+
+if AUTO_DETECT_SIZE then
+	centerX, centerZ = 0, 0
+	local probedRadius = probeGroundRadius(centerX, centerZ)
+
+	if probedRadius > 0 then
+		spawnRadiusX = probedRadius * 0.9 -- pull in 10% so trees don't spawn at the very edge
+		spawnRadiusZ = probedRadius * 0.9
+		print("Auto-detected ground radius from (0,0): ~" .. math.floor(probedRadius) .. " studs")
+	else
+		-- No sculpted Terrain found -- fall back to scanning for the biggest flat Part (baseplate).
+		local biggestPart, biggestArea = nil, 0
+		for _, obj in ipairs(Workspace:GetChildren()) do
+			if obj:IsA("BasePart") then
+				local area = obj.Size.X * obj.Size.Z
+				if area > biggestArea then
+					biggestArea = area
+					biggestPart = obj
+				end
+			end
+		end
+
+		if biggestPart then
+			centerX = biggestPart.Position.X
+			centerZ = biggestPart.Position.Z
+			spawnRadiusX = biggestPart.Size.X / 2 * 0.9
+			spawnRadiusZ = biggestPart.Size.Z / 2 * 0.9
+			print("Auto-detected baseplate: '" .. biggestPart.Name .. "' size " .. math.floor(biggestPart.Size.X) .. " x " .. math.floor(biggestPart.Size.Z))
+		else
+			warn("AUTO_DETECT_SIZE couldn't find Terrain or a baseplate Part. Falling back to SPAWN_RADIUS = " .. SPAWN_RADIUS)
+			centerX, centerZ = CENTER_X, CENTER_Z
+			spawnRadiusX, spawnRadiusZ = SPAWN_RADIUS, SPAWN_RADIUS
+		end
+	end
+else
+	centerX, centerZ = CENTER_X, CENTER_Z
+	spawnRadiusX, spawnRadiusZ = SPAWN_RADIUS, SPAWN_RADIUS
+end
+
+-- Raycasts straight down and hits ANYTHING solid (terrain, baseplate, custom parts)
+-- excluding the Trees folder itself so trees don't block each other.
+local function getGroundHeight(x, z)
+	local startPos = Vector3.new(x, 1000, z)
+	local direction = Vector3.new(0, -2000, 0)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = {treeFolder}
+
+	local result = Workspace:Raycast(startPos, direction, rayParams)
+	if result then
+		return result.Position.Y
+	end
+	return nil
+end
+
+local function isTooClose(pos, positions, minDist)
+	for _, p in ipairs(positions) do
+		if (pos - p).Magnitude < minDist then
+			return true
+		end
+	end
+	return false
+end
+
+-- Generate positions
+local treePositions = {}
+local attempts = 0
+local maxAttempts = TREE_COUNT * 10
+local missedRaycasts = 0
+
+while #treePositions < TREE_COUNT and attempts < maxAttempts do
+	attempts += 1
+	-- Spread evenly across a rectangle instead of a circle, so corners get covered too
+	local x = centerX + (math.random() * 2 - 1) * spawnRadiusX
+	local z = centerZ + (math.random() * 2 - 1) * spawnRadiusZ
+
+	local y = getGroundHeight(x, z)
+
+	if y == nil then
+		missedRaycasts += 1
+	else
+		local pos = Vector3.new(x, y, z)
+		if not isTooClose(pos, treePositions, MIN_DISTANCE) then
+			table.insert(treePositions, pos)
+		end
+	end
+end
+
+print("Attempts: " .. attempts .. " | Valid positions found: " .. #treePositions .. " | Raycasts that hit nothing: " .. missedRaycasts)
+
+if missedRaycasts == attempts then
+	warn("Every single raycast missed. This usually means there's nothing solid under (0,0,0) within your SPAWN_RADIUS.")
+	warn("Check: is there a baseplate/terrain actually there? Try walking to (0,0,0) in-game to confirm.")
+end
+
+-- Spawn trees
+local spawned = 0
+for _, pos in ipairs(treePositions) do
+	local newTree = template:Clone()
+	newTree.Parent = treeFolder
+	newTree:PivotTo(CFrame.new(pos))
+
+	local scale = 0.8 + math.random() * 0.6
+	newTree:ScaleTo(scale)
+	spawned += 1
+end
+
+print("========================================")
+print("DONE: Spawned " .. spawned .. " trees into Workspace.Trees")
+print("========================================")
