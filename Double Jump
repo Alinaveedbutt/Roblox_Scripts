@@ -1,0 +1,62 @@
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
+local player = Players.LocalPlayer
+local character = script.Parent
+local humanoid = character:WaitForChild("Humanoid")
+local hrp = character:WaitForChild("HumanoidRootPart")
+-- Configuration
+local DOUBLE_JUMP_POWER = 67 -- Adjust this to make the double jump higher or lower
+local hasDoubleJumped = false
+local canDoubleJump = false
+local timeAtFirstJump = 0
+-- Quick cloud/burst effect under the feet
+local function playDoubleJumpVFX()
+	local attachment = Instance.new("Attachment")
+	attachment.Position = Vector3.new(0, -2.5, 0)
+	attachment.Parent = hrp
+	local particles = Instance.new("ParticleEmitter")
+	particles.Color = ColorSequence.new(Color3.new(1, 1, 1))
+	particles.Size = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(1, 0)})
+	particles.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.5), NumberSequenceKeypoint.new(1, 1)})
+	particles.Speed = NumberRange.new(5, 10)
+	particles.Lifetime = NumberRange.new(0.2, 0.4)
+	particles.SpreadAngle = Vector2.new(90, 90)
+	particles.EmissionDirection = Enum.NormalId.Bottom
+	particles.Rate = 0
+	particles.Parent = attachment
+	particles:Emit(15)
+	Debris:AddItem(attachment, 1)
+end
+-- Track exactly what the character is doing
+humanoid.StateChanged:Connect(function(oldState, newState)
+	if newState == Enum.HumanoidStateType.Landed then
+		-- Reset completely when feet touch the ground
+		hasDoubleJumped = false
+		canDoubleJump = false
+	elseif newState == Enum.HumanoidStateType.Jumping then
+		-- Player jumped off the ground
+		timeAtFirstJump = os.clock()
+		canDoubleJump = true
+	elseif newState == Enum.HumanoidStateType.Freefall then
+		-- Player walked off a cliff without jumping first
+		if not canDoubleJump and not hasDoubleJumped then
+			timeAtFirstJump = os.clock()
+			canDoubleJump = true
+		end
+	end
+end)
+-- Listen for the jump command
+UserInputService.JumpRequest:Connect(function()
+	if not humanoid or humanoid.Health <= 0 then return end
+	-- 1. Check if they are allowed to double jump and haven't already
+	if canDoubleJump and not hasDoubleJumped then
+		-- 2. Prevent instant-firing! Wait 0.2 seconds after the first jump begins
+		if os.clock() - timeAtFirstJump < 0.2 then return end
+		hasDoubleJumped = true
+		-- Force the player upward while keeping horizontal momentum
+		hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, DOUBLE_JUMP_POWER, hrp.AssemblyLinearVelocity.Z)
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+		playDoubleJumpVFX()
+	end
+end)
