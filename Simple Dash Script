@@ -1,0 +1,73 @@
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local rootPart = character:WaitForChild("HumanoidRootPart")
+
+-- ====================
+-- DASH CONFIGURATION
+-- ====================
+local DASH_SPEED = 75       -- How fast the dash propels the player
+local DASH_DURATION = 0.2   -- How long the dash force lasts (in seconds)
+local DASH_COOLDOWN = 1.2   -- Cooldown before dashing again (in seconds)
+
+local isDashing = false
+local lastDashTime = 0
+
+local function performDash()
+	local currentTime = os.clock()
+	
+	-- Check cooldown and active state
+	if isDashing or (currentTime - lastDashTime < DASH_COOLDOWN) then
+		return
+	end
+
+	-- Prevent dashing while sitting or dead
+	if humanoid:GetState() == Enum.HumanoidStateType.Dead or humanoid.Sit then
+		return
+	end
+
+	isDashing = true
+	lastDashTime = currentTime
+
+	-- Determine direction: Dash toward movement direction (WASD), or forward if standing still
+	local moveDirection = humanoid.MoveDirection
+	local dashVector
+	
+	if moveDirection.Magnitude > 0 then
+		dashVector = moveDirection.Unit
+	else
+		dashVector = rootPart.CFrame.LookVector
+	end
+
+	-- Create velocity constraints for physics-based movement
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = rootPart
+
+	local linearVelocity = Instance.new("LinearVelocity")
+	linearVelocity.Attachment0 = attachment
+	linearVelocity.MaxForce = 100000 -- High force to overcome friction/momentum
+	linearVelocity.VectorVelocity = dashVector * DASH_SPEED
+	linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	linearVelocity.Parent = rootPart
+
+	-- Remove velocity force after the duration ends
+	task.delay(DASH_DURATION, function()
+		linearVelocity:Destroy()
+		attachment:Destroy()
+		isDashing = false
+	end)
+end
+
+-- Listen for keypress
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	-- Ignore keypresses if typing in chat or interacting with UI
+	if gameProcessed then return end
+
+	if input.KeyCode == Enum.KeyCode.Q then
+		performDash()
+	end
+end)
+
