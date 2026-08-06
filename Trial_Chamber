@@ -35,7 +35,15 @@ local CONFIG = {
 	roomA = {
 		width = 18,
 		height = 18,
-		length = 100,
+		length = 205,
+		hazardStart = 4,
+		hazardEndOffset = 28,
+		spacingMin = 10,
+		spacingMax = 14,
+		entranceGauntletEnd = 42,
+		connectorSpacingMin = 8,
+		connectorSpacingMax = 11,
+		connectorHubClearance = 5,
 	},
 
 	roomB = {
@@ -865,7 +873,20 @@ end
 local function buildSpikeTrap(parent, name, floorPosition, forward)
 	local right = getRight(forward)
 	local t = CONFIG.spikeTrap
-	local trap = newFolder(parent, name)
+	local trap = Instance.new("Model")
+	trap.Name = name
+	trap.Parent = parent
+
+	local rootPart = newPart({
+		Name = "RootPart",
+		Size = Vector3.new(1, 1, 1),
+		CFrame = orientedCFrame(floorPosition, forward),
+		Transparency = 1,
+		CanCollide = false,
+		CanQuery = false,
+		Parent = trap,
+	})
+	trap.PrimaryPart = rootPart
 
 	----------------------------------------------------------------
 	-- Stone housing: two stacked, inset courses of ancient stone
@@ -1831,6 +1852,541 @@ end
 -- ROOM A: SHADOWS
 ----------------------------------------------------------------------
 
+local function buildCeilingSpike(parent, name, centerPosition, forward)
+	local trap = buildSpikeTrap(parent, name, centerPosition, forward)
+	trap:PivotTo(trap:GetPivot() * CFrame.Angles(0, 0, math.pi))
+	return trap
+end
+
+local function buildWallSpike(parent, name, centerPosition, forward, isRightWall)
+	local trap = buildSpikeTrap(parent, name, centerPosition, forward)
+	local angle = isRightWall and (math.pi / 2) or (-math.pi / 2)
+	trap:PivotTo(trap:GetPivot() * CFrame.Angles(0, 0, angle))
+	return trap
+end
+
+-- Hub-side connector corridor for Room A (Hallway_RoomA): packs the empty
+-- transition from the central hub into the trial hall with the same trap
+-- builders used elsewhere, at slightly tighter dash-friendly spacing.
+local function generateRoomAConnectorHazards(parent, corridorStart, forward, corridorLength)
+	local width = CONFIG.corridor.width
+	local height = CONFIG.corridor.height
+	local roomCfg = CONFIG.roomA
+	local hazardRandom = Random.new()
+	local right = getRight(forward)
+	local leftWallOrigin = corridorStart - right * (width / 2)
+	local rightWallOrigin = corridorStart + right * (width / 2)
+	local bladePivotY = height - CONFIG.swingingBlade.mountDrop
+
+	local trapIndex = 1
+	local bladeIndex = 1
+
+	local function connectorSpacing()
+		return hazardRandom:NextInteger(roomCfg.connectorSpacingMin, roomCfg.connectorSpacingMax)
+	end
+
+	local function placeBlade(dist, lateralOffset)
+		lateralOffset = lateralOffset or 0
+
+		local blade = buildSwingingBlade(
+			parent,
+			"ConnectorBlade_" .. bladeIndex,
+			corridorStart + forward * dist + right * lateralOffset + Vector3.new(0, bladePivotY, 0),
+			forward
+		)
+
+		blade:SetAttribute("PhaseOffset", hazardRandom:NextNumber())
+		bladeIndex = bladeIndex + 1
+	end
+
+	local function placeFloor(dist, lateralOffset)
+		lateralOffset = lateralOffset or 0
+
+		buildSpikeTrap(
+			parent,
+			"ConnectorSpike_" .. trapIndex,
+			corridorStart + forward * dist + right * lateralOffset,
+			forward
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeCeiling(dist)
+		buildCeilingSpike(
+			parent,
+			"ConnectorCeiling_" .. trapIndex,
+			corridorStart + forward * dist + Vector3.new(0, height, 0),
+			forward
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeWallLeft(dist)
+		buildWallSpike(
+			parent,
+			"ConnectorWallL_" .. trapIndex,
+			leftWallOrigin + forward * dist + Vector3.new(0, height / 2 - 3, 0),
+			forward,
+			false
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeWallRight(dist)
+		buildWallSpike(
+			parent,
+			"ConnectorWallR_" .. trapIndex,
+			rightWallOrigin + forward * dist + Vector3.new(0, height / 2 - 3, 0),
+			forward,
+			true
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local connectorEncounters = {
+		function(dist)
+			placeFloor(dist)
+		end,
+		function(dist)
+			placeCeiling(dist)
+		end,
+		function(dist)
+			placeWallLeft(dist)
+		end,
+		function(dist)
+			placeWallRight(dist)
+		end,
+		function(dist)
+			placeBlade(dist)
+		end,
+		function(dist)
+			placeFloor(dist)
+			placeBlade(dist)
+		end,
+		function(dist)
+			placeCeiling(dist)
+			placeBlade(dist, hazardRandom:NextInteger(-1, 1))
+		end,
+		function(dist)
+			placeWallLeft(dist)
+			placeWallRight(dist)
+		end,
+		function(dist)
+			placeWallRight(dist)
+			placeFloor(dist, -2)
+		end,
+		function(dist)
+			placeWallLeft(dist)
+			placeFloor(dist, 2)
+		end,
+	}
+
+	local hazardStart = roomCfg.connectorHubClearance
+	local hazardEnd = corridorLength - 4
+	local currentDist = hazardStart
+
+	while currentDist < hazardEnd do
+		local encounter = connectorEncounters[hazardRandom:NextInteger(1, #connectorEncounters)]
+		encounter(currentDist)
+		currentDist = currentDist + connectorSpacing()
+	end
+end
+
+-- Procedural obstacle course for Room A: randomized encounters packed along
+-- the hall at dash-friendly spacing (10-14 studs). Reuses existing trap
+-- builders only; a fresh RNG each build keeps the route unpredictable.
+local function generateRoomAObstacleCourse(room, entrancePosition, forward, length, width, height)
+	local right = getRight(forward)
+	local leftWallOrigin = entrancePosition - right * (width / 2)
+	local rightWallOrigin = entrancePosition + right * (width / 2)
+	local roomCfg = CONFIG.roomA
+	local hazardRandom = Random.new()
+
+	local trapIndex = 1
+	local bladeIndex = 1
+	local decorIndex = 1
+	local zigzagIndex = 1
+	local bladePivotY = height - CONFIG.swingingBlade.mountDrop
+	local dividerWidth = width * 0.62
+	local hazardEnd = length - roomCfg.hazardEndOffset
+	local finalStretchStart = hazardEnd - 35
+
+	local function nextSpacing()
+		return hazardRandom:NextInteger(roomCfg.spacingMin, roomCfg.spacingMax)
+	end
+
+	local function placeBlade(dist, lateralOffset)
+		lateralOffset = lateralOffset or 0
+
+		local blade = buildSwingingBlade(
+			room,
+			"SwingingBlade_" .. bladeIndex,
+			entrancePosition + forward * dist + right * lateralOffset + Vector3.new(0, bladePivotY, 0),
+			forward
+		)
+
+		blade:SetAttribute("PhaseOffset", hazardRandom:NextNumber())
+		bladeIndex = bladeIndex + 1
+
+		return blade
+	end
+
+	local function placeFloor(dist, lateralOffset)
+		lateralOffset = lateralOffset or 0
+
+		buildSpikeTrap(
+			room,
+			"SpikeTrap_" .. trapIndex,
+			entrancePosition + forward * dist + right * lateralOffset,
+			forward
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeCeiling(dist)
+		buildCeilingSpike(
+			room,
+			"CeilingSpike_" .. trapIndex,
+			entrancePosition + forward * dist + Vector3.new(0, height, 0),
+			forward
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeWallLeft(dist)
+		buildWallSpike(
+			room,
+			"WallSpike_" .. trapIndex,
+			leftWallOrigin + forward * dist + Vector3.new(0, height / 2 - 3, 0),
+			forward,
+			false
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local function placeWallRight(dist)
+		buildWallSpike(
+			room,
+			"WallSpike_" .. trapIndex,
+			rightWallOrigin + forward * dist + Vector3.new(0, height / 2 - 3, 0),
+			forward,
+			true
+		)
+		trapIndex = trapIndex + 1
+	end
+
+	local encounterWeights = {
+		{ id = "floor", weight = 18 },
+		{ id = "ceiling", weight = 18 },
+		{ id = "wallLeft", weight = 14 },
+		{ id = "wallRight", weight = 14 },
+		{ id = "blade", weight = 12 },
+		{ id = "floorBlade", weight = 10 },
+		{ id = "ceilingBlade", weight = 8 },
+		{ id = "opposingWalls", weight = 10 },
+		{ id = "crushRight", weight = 5 },
+		{ id = "crushLeft", weight = 5 },
+		{ id = "doubleCeiling", weight = 6 },
+	}
+
+	local finalEncounterWeights = {
+		{ id = "floorBlade", weight = 14 },
+		{ id = "ceilingBlade", weight = 12 },
+		{ id = "opposingWalls", weight = 14 },
+		{ id = "crushRight", weight = 10 },
+		{ id = "crushLeft", weight = 10 },
+		{ id = "floor", weight = 8 },
+		{ id = "ceiling", weight = 8 },
+		{ id = "blade", weight = 10 },
+		{ id = "wallLeft", weight = 7 },
+		{ id = "wallRight", weight = 7 },
+	}
+
+	local function pickEncounterId(inFinalStretch)
+		local pool = inFinalStretch and finalEncounterWeights or encounterWeights
+		local totalWeight = 0
+
+		for _, entry in ipairs(pool) do
+			totalWeight = totalWeight + entry.weight
+		end
+
+		local roll = hazardRandom:NextNumber() * totalWeight
+		local cumulative = 0
+
+		for _, entry in ipairs(pool) do
+			cumulative = cumulative + entry.weight
+
+			if roll <= cumulative then
+				return entry.id
+			end
+		end
+
+		return pool[1].id
+	end
+
+	local encounters = {
+		floor = function(dist)
+			placeFloor(dist)
+		end,
+		ceiling = function(dist)
+			placeCeiling(dist)
+		end,
+		wallLeft = function(dist)
+			placeWallLeft(dist)
+		end,
+		wallRight = function(dist)
+			placeWallRight(dist)
+		end,
+		blade = function(dist)
+			placeBlade(dist)
+		end,
+		floorBlade = function(dist)
+			placeFloor(dist)
+			placeBlade(dist)
+		end,
+		ceilingBlade = function(dist)
+			placeCeiling(dist)
+			placeBlade(dist, hazardRandom:NextInteger(-1, 1) * 2)
+		end,
+		opposingWalls = function(dist)
+			placeWallLeft(dist)
+			placeWallRight(dist)
+		end,
+		crushRight = function(dist)
+			placeWallRight(dist)
+			placeFloor(dist, -3)
+		end,
+		crushLeft = function(dist)
+			placeWallLeft(dist)
+			placeFloor(dist, 3)
+		end,
+		doubleCeiling = function(dist)
+			placeCeiling(dist)
+
+			if dist + 8 < hazardEnd then
+				placeCeiling(dist + 8)
+			end
+		end,
+	}
+
+	local function tryPlaceDecor(dist)
+		if hazardRandom:NextNumber() > 0.22 then
+			return
+		end
+
+		local side = hazardRandom:NextInteger(0, 1) == 0 and -1 or 1
+		local decorType = hazardRandom:NextInteger(1, 6)
+		local name = "Decor_" .. decorIndex
+		decorIndex = decorIndex + 1
+
+		if decorType == 1 then
+			addRubblePile(
+				room,
+				name,
+				entrancePosition + forward * dist + right * side * (width / 2 - 2.5),
+				4 + hazardRandom:NextInteger(0, 2),
+				2
+			)
+		elseif decorType == 2 then
+			addCollapsedMasonry(
+				room,
+				name,
+				entrancePosition + forward * dist + right * side * (width / 2 - 2.5),
+				4,
+				2
+			)
+		elseif decorType == 3 then
+			addFallenCeilingBlock(room, name, leftWallOrigin + forward * dist, forward, side)
+		elseif decorType == 4 then
+			addWallAlcove(
+				room,
+				name,
+				(side < 0 and leftWallOrigin or rightWallOrigin) + forward * dist,
+				side < 0 and right or -right,
+				2.4,
+				3.2,
+				CONFIG.materials.wall,
+				CONFIG.colors.wall
+			)
+		elseif decorType == 5 then
+			addDamagedArch(
+				room,
+				name,
+				(side < 0 and leftWallOrigin or rightWallOrigin) + forward * dist,
+				side < 0 and right or -right,
+				4 + hazardRandom:NextNumber() * 0.8,
+				height,
+				CONFIG.materials.wall,
+				CONFIG.colors.wall
+			)
+		else
+			addBrokenSupport(
+				room,
+				name,
+				(side < 0 and leftWallOrigin or rightWallOrigin) + forward * dist,
+				forward,
+				height,
+				height * (0.35 + hazardRandom:NextNumber() * 0.15)
+			)
+		end
+	end
+
+	local function placeZigzagSequence(startDist)
+		if startDist + 36 > hazardEnd then
+			return startDist
+		end
+
+		local leftDist = startDist
+		local rightDist = startDist + 14
+
+		addOrientedPart(
+			room,
+			"ZigzagDividerLeft_" .. zigzagIndex,
+			Vector3.new(dividerWidth, height, 1.5),
+			entrancePosition
+				+ forward * leftDist
+				- right * (width / 2 - dividerWidth / 2)
+				+ Vector3.new(0, height / 2, 0),
+			forward,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+		addPilaster(
+			room,
+			"DividerBraceLeft_" .. zigzagIndex,
+			leftWallOrigin + forward * leftDist,
+			forward,
+			height,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+		placeBlade(leftDist, dividerWidth / 2)
+
+		addOrientedPart(
+			room,
+			"ZigzagDividerRight_" .. zigzagIndex,
+			Vector3.new(dividerWidth, height, 1.5),
+			entrancePosition
+				+ forward * rightDist
+				+ right * (width / 2 - dividerWidth / 2)
+				+ Vector3.new(0, height / 2, 0),
+			forward,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+		addPilaster(
+			room,
+			"DividerBraceRight_" .. zigzagIndex,
+			rightWallOrigin + forward * rightDist,
+			forward,
+			height,
+			CONFIG.materials.wall,
+			CONFIG.colors.wall
+		)
+		placeBlade(rightDist, -dividerWidth / 2)
+
+		zigzagIndex = zigzagIndex + 1
+
+		return rightDist + nextSpacing()
+	end
+
+	local function entranceSpacing()
+		return hazardRandom:NextInteger(roomCfg.connectorSpacingMin, roomCfg.connectorSpacingMax)
+	end
+
+	local function placeEntranceGauntlet()
+		local gauntletEnd = math.min(roomCfg.entranceGauntletEnd, hazardEnd - 10)
+		local currentDist = roomCfg.hazardStart
+
+		local gauntletEncounters = {
+			function(dist)
+				placeCeiling(dist)
+			end,
+			function(dist)
+				placeFloor(dist)
+			end,
+			function(dist)
+				placeWallRight(dist)
+			end,
+			function(dist)
+				placeWallLeft(dist)
+			end,
+			function(dist)
+				placeBlade(dist)
+			end,
+			function(dist)
+				placeFloor(dist)
+				placeBlade(dist, hazardRandom:NextInteger(-1, 1) * 2)
+			end,
+			function(dist)
+				placeCeiling(dist)
+				placeBlade(dist)
+			end,
+			function(dist)
+				placeWallRight(dist)
+				placeFloor(dist, -3)
+			end,
+			function(dist)
+				placeWallLeft(dist)
+				placeFloor(dist, 3)
+			end,
+			function(dist)
+				placeWallLeft(dist)
+				placeWallRight(dist)
+			end,
+		}
+
+		while currentDist < gauntletEnd do
+			local encounter = gauntletEncounters[hazardRandom:NextInteger(1, #gauntletEncounters)]
+			encounter(currentDist)
+			currentDist = currentDist + entranceSpacing()
+		end
+
+		return currentDist
+	end
+
+	-- Fixed entrance storytelling (hazards begin almost immediately afterward).
+	addRubblePile(room, "RubbleNearEntrance", entrancePosition + forward * 6 - right * (width / 2 - 2.5), 6, 2.5)
+	addCollapsedMasonry(room, "CaveInNearEntrance", entrancePosition + forward * 7 + right * (width / 2 - 3), 5, 2.2)
+	addWarningCarving(room, "WarningCarving", leftWallOrigin + forward * 11, right, height * 0.55)
+	addSkeletalRemains(room, "FallenTrialTaker", entrancePosition + forward * 8 + right * (width / 2 - 2), forward)
+
+	local currentDist = placeEntranceGauntlet()
+
+	while currentDist < hazardEnd do
+		local inFinalStretch = currentDist >= finalStretchStart
+
+		if hazardRandom:NextNumber() < 0.07 and currentDist + 36 < hazardEnd then
+			currentDist = placeZigzagSequence(currentDist)
+		else
+			local encounterId = pickEncounterId(inFinalStretch)
+			encounters[encounterId](currentDist)
+
+			local spacing = nextSpacing()
+			tryPlaceDecor(currentDist + spacing * 0.5)
+			currentDist = currentDist + spacing
+		end
+	end
+
+	-- Exit dressing before the portcullis.
+	local exitDressDist = length - 22
+
+	addCrackedFloorPatch(room, "CrackedFloorNearDoor", entrancePosition + forward * exitDressDist, forward, width - 4, 6)
+	addRubblePile(
+		room,
+		"RubbleNearExit",
+		entrancePosition + forward * (exitDressDist + 6) + right * (width / 2 - 2.5),
+		6,
+		2.5
+	)
+
+	buildPortcullisDoor(room, "ExitPortcullis", entrancePosition + forward * (length - 12), forward, width - 1, height)
+
+	addBrokenTorchMount(room, "BrokenTorch_2", leftWallOrigin + forward * (length - 8), right, CONFIG.detail.torchHeight)
+	addWallAlcove(room, "AlcoveNiche_Last", rightWallOrigin + forward * (length - 3), -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
+	addDamagedArch(room, "DamagedArch_Last", leftWallOrigin + forward * (length - 2), right, 4.2, height, CONFIG.materials.wall, CONFIG.colors.wall)
+end
+
 local function buildRoomA(root, entrancePosition, forward)
 	local room = newFolder(root, "RoomA_Shadows")
 
@@ -1920,127 +2476,7 @@ local function buildRoomA(root, entrancePosition, forward)
 	addPilaster(room, "CornerExitLeft", leftWallOrigin + forward * length, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
 	addPilaster(room, "CornerExitRight", rightWallOrigin + forward * length, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
 
-	-- Pilasters bracing each zigzag divider where it meets its side wall
-	-- (left divider lands on the left wall at 40 studs, right divider on
-	-- the right wall at 61 studs — see the divider placement below).
-	addPilaster(room, "DividerBraceLeft", leftWallOrigin + forward * 40, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
-	addPilaster(room, "DividerBraceRight", rightWallOrigin + forward * 61, forward, height, CONFIG.materials.wall, CONFIG.colors.wall)
-
-	addRubblePile(room, "RubbleNearEntrance", entrancePosition + forward * 6 - right * (width / 2 - 2.5), 6, 2.5)
-
-	-- Storytelling: a partial cave-in and a warning carving greet the
-	-- player before the first trap, and the remains of an earlier
-	-- trial-taker who didn't clear it are tucked against the wall.
-	addCollapsedMasonry(room, "CaveInNearEntrance", entrancePosition + forward * 7 + right * (width / 2 - 3), 5, 2.2)
-	addWarningCarving(room, "WarningCarving", leftWallOrigin + forward * 11, right, height * 0.55)
-	addSkeletalRemains(room, "FallenTrialTaker", entrancePosition + forward * 8 + right * (width / 2 - 2), forward)
-
-	-- Fill the long bare run past the first trap and before the broken
-	-- support: a display niche and a partial ruined arch on the right
-	-- wall, clear of the trap housing and the (left-wall) support.
-	addWallAlcove(room, "AlcoveNiche_1", rightWallOrigin + forward * 26, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
-	addDamagedArch(room, "DamagedArch_1", rightWallOrigin + forward * 35, -right, 4.5, height, CONFIG.materials.wall, CONFIG.colors.wall)
-	addRubblePile(room, "DebrisScatter_1", entrancePosition + forward * 29 - right * (width / 2 - 2.5), 5, 2)
-
-	-- Stone-housed mechanical spike traps. Spaced clear of the zigzag
-	-- dividers (40, 61) so the housings never intersect them.
-	for index, distance in ipairs({ 18, 50, 75 }) do
-		buildSpikeTrap(room, "SpikeTrap_" .. index, entrancePosition + forward * distance, forward)
-	end
-
-	-- Ancient relief on the left wall, trailing off from Trap 1 toward
-	-- the broken support -- ordinary ornamental stonework, not another
-	-- warning.
-	addAncientCarving(room, "AncientCarving_1", leftWallOrigin + forward * 24, right, height * 0.5)
-
-	-- A support that gave way under the weight of the mechanisms above,
-	-- toppled to one side between the first two traps.
-	addBrokenSupport(room, "BrokenSupport", leftWallOrigin + forward * 31, forward, height, height * 0.4)
-
-	-- A dead torch in the narrow gap between Trap 2 and the second
-	-- divider -- nobody's replaced it since Trap 2 was reset last.
-	addBrokenTorchMount(room, "BrokenTorch_1", rightWallOrigin + forward * 58, -right, CONFIG.detail.torchHeight)
-
-	-- Zigzag walls: enough room for a dash around each side.
-	local dividerWidth = width * 0.62
-
-	addOrientedPart(
-		room,
-		"ZigzagDividerLeft",
-		Vector3.new(dividerWidth, height, 1.5),
-		entrancePosition
-			+ forward * 40
-		- right * (width / 2 - dividerWidth / 2)
-			+ Vector3.new(0, height / 2, 0),
-		forward,
-		CONFIG.materials.wall,
-		CONFIG.colors.wall
-	)
-
-	addOrientedPart(
-		room,
-		"ZigzagDividerRight",
-		Vector3.new(dividerWidth, height, 1.5),
-		entrancePosition
-			+ forward * 61
-			+ right * (width / 2 - dividerWidth / 2)
-			+ Vector3.new(0, height / 2, 0),
-		forward,
-		CONFIG.materials.wall,
-		CONFIG.colors.wall
-	)
-
-	-- Past the second divider, before Trap 3 picks back up: a slab that
-	-- came down from the ceiling long ago, and a niche opposite it.
-	addFallenCeilingBlock(room, "FallenBlock_1", leftWallOrigin + forward * 65, forward, 1)
-	addWallAlcove(room, "AlcoveNiche_2", rightWallOrigin + forward * 66, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
-
-	-- Pendulum blades guard the gap each divider leaves open, so the
-	-- zigzag dash also has to be timed, not just aimed.
-	local blade1Right = dividerWidth / 2
-	local blade2Right = -dividerWidth / 2
-	local bladePivotY = height - CONFIG.swingingBlade.mountDrop
-
-	buildSwingingBlade(
-		room,
-		"SwingingBlade_1",
-		entrancePosition + forward * 40 + right * blade1Right + Vector3.new(0, bladePivotY, 0),
-		forward
-	)
-
-	buildSwingingBlade(
-		room,
-		"SwingingBlade_2",
-		entrancePosition + forward * 61 + right * blade2Right + Vector3.new(0, bladePivotY, 0),
-		forward
-	)
-
-	-- Third blade, centered, near the end of the hall as the final
-	-- dodge before the exit -- same config as the others (matches
-	-- style and speed), just placed after the last spike trap clears.
-	buildSwingingBlade(
-		room,
-		"SwingingBlade_3",
-		entrancePosition + forward * 84 + Vector3.new(0, bladePivotY, 0),
-		forward
-	)
-
-	-- Carving framing the final blade -- the last thing a player sees
-	-- before the timed dash to the door. The blade itself never reaches
-	-- the walls, so this can sit right at its distance with no clash.
-	addAncientCarving(room, "AncientCarving_2", leftWallOrigin + forward * 84, right, height * 0.5)
-
-	addRubblePile(room, "RubbleNearExit", entrancePosition + forward * 93 + right * (width / 2 - 2.5), 6, 2.5)
-	addCrackedFloorPatch(room, "CrackedFloorNearDoor", entrancePosition + forward * 85, forward, width - 4, 6)
-
-	-- Ancient stone portcullis sealing the exit.
-	buildPortcullisDoor(room, "ExitPortcullis", entrancePosition + forward * 88, forward, width - 1, height)
-
-	-- Beyond the gate: a dead torch and a final niche/arch pairing so
-	-- the last stretch to the exit wall doesn't read as an afterthought.
-	addBrokenTorchMount(room, "BrokenTorch_2", leftWallOrigin + forward * 92, right, CONFIG.detail.torchHeight)
-	addWallAlcove(room, "AlcoveNiche_3", rightWallOrigin + forward * 97, -right, 2.4, 3.2, CONFIG.materials.wall, CONFIG.colors.wall)
-	addDamagedArch(room, "DamagedArch_2", leftWallOrigin + forward * 98, right, 4.2, height, CONFIG.materials.wall, CONFIG.colors.wall)
+	generateRoomAObstacleCourse(room, entrancePosition, forward, length, width, height)
 
 	return room
 end
@@ -2750,7 +3186,8 @@ local function animateSwingingBlades()
 
 				if axis and degrees and period and period > 0 then
 					local amplitude = math.rad(degrees)
-					local angle = amplitude * math.sin((elapsed / period) * (math.pi * 2))
+					local phaseOffset = blade:GetAttribute("PhaseOffset") or 0
+					local angle = amplitude * math.sin((elapsed / period + phaseOffset) * (math.pi * 2))
 					local pivotPosition = pivotModel.PrimaryPart.Position
 
 					pivotModel:PivotTo(CFrame.new(pivotPosition) * CFrame.fromAxisAngle(axis, angle))
@@ -2805,7 +3242,7 @@ local function main()
 			basePosition
 			+ branch.forward * (CONFIG.hub.radius - 1)
 
-		buildCorridor(
+		local corridor = buildCorridor(
 			root,
 			"Hallway_" .. branch.roomName,
 			corridorStart,
@@ -2818,6 +3255,7 @@ local function main()
 			+ branch.forward * CONFIG.corridor.length
 
 		if branch.name == "A" then
+			generateRoomAConnectorHazards(corridor, corridorStart, branch.forward, CONFIG.corridor.length)
 			buildRoomA(root, roomEntrance, branch.forward)
 		elseif branch.name == "B" then
 			buildBarredGate(
@@ -2849,4 +3287,4 @@ local function main()
 end
 
 main()
-animateSwingingBlades()  
+animateSwingingBlades()
