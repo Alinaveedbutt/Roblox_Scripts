@@ -44,6 +44,12 @@ local CONFIG = {
 		connectorSpacingMin = 8,
 		connectorSpacingMax = 11,
 		connectorHubClearance = 5,
+		-- Fixed seeds for the hazard layout -- same layout every run,
+		-- for every player, but changing either number reshuffles that
+		-- run's arrangement into a different (still fixed) one. Change
+		-- these first if you want to try another layout.
+		connectorHazardSeed = 20260930,
+		hazardSeed = 20260931,
 	},
 
 	roomB = {
@@ -1865,6 +1871,20 @@ local function buildWallSpike(parent, name, centerPosition, forward, isRightWall
 	return trap
 end
 
+-- Minimum center-to-center distance enforced between any two
+-- spike-trap-producing placements (floor/ceiling/wall, alone or in a
+-- combo encounter). CONFIG.spikeTrap's own housing footprint is
+-- depth(9) + housingMargin(2.1) * 2 = 13.2 studs deep; the old 8-14 stud
+-- "spacingMin/Max" was tuned for a single blade or chokepoint, not a
+-- trap's actual stone housing, so two traps rolled back-to-back (or a
+-- doubleCeiling's internal offset) could land closer together than the
+-- housings themselves are deep and merge into one solid block with no
+-- dashable gap. This adds real clearance on top of that housing depth
+-- specifically after a trap is placed, without touching trap geometry,
+-- corridor length, or anything blade-only.
+local trapFootprintDepth = CONFIG.spikeTrap.depth + CONFIG.spikeTrap.housingMargin * 2
+local trapClearance = trapFootprintDepth + 5
+
 -- Hub-side connector corridor for Room A (Hallway_RoomA): packs the empty
 -- transition from the central hub into the trial hall with the same trap
 -- builders used elsewhere, at slightly tighter dash-friendly spacing.
@@ -1872,7 +1892,12 @@ local function generateRoomAConnectorHazards(parent, corridorStart, forward, cor
 	local width = CONFIG.corridor.width
 	local height = CONFIG.corridor.height
 	local roomCfg = CONFIG.roomA
-	local hazardRandom = Random.new()
+	-- Fixed seed: Random.new() with no argument seeds from the current
+	-- time, so the hazard order changed on every run. A fixed seed
+	-- makes the layout (which encounter lands where) identical every
+	-- time the script runs, for every player, while still picking
+	-- pseudo-randomly from the full mix of hazard types below.
+	local hazardRandom = Random.new(roomCfg.connectorHazardSeed)
 	local right = getRight(forward)
 	local leftWallOrigin = corridorStart - right * (width / 2)
 	local rightWallOrigin = corridorStart + right * (width / 2)
@@ -1943,42 +1968,45 @@ local function generateRoomAConnectorHazards(parent, corridorStart, forward, cor
 		trapIndex = trapIndex + 1
 	end
 
+	-- Each entry now carries whether it plants a spike-trap housing, so
+	-- the placement loop below can enforce trapClearance only when one
+	-- was actually placed (a lone blade doesn't need the wider gap).
 	local connectorEncounters = {
-		function(dist)
+		{ hasTrap = true, place = function(dist)
 			placeFloor(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeCeiling(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeWallLeft(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeWallRight(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = false, place = function(dist)
 			placeBlade(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeFloor(dist)
 			placeBlade(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeCeiling(dist)
 			placeBlade(dist, hazardRandom:NextInteger(-1, 1))
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeWallLeft(dist)
 			placeWallRight(dist)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeWallRight(dist)
 			placeFloor(dist, -2)
-		end,
-		function(dist)
+		end },
+		{ hasTrap = true, place = function(dist)
 			placeWallLeft(dist)
 			placeFloor(dist, 2)
-		end,
+		end },
 	}
 
 	local hazardStart = roomCfg.connectorHubClearance
@@ -1987,20 +2015,31 @@ local function generateRoomAConnectorHazards(parent, corridorStart, forward, cor
 
 	while currentDist < hazardEnd do
 		local encounter = connectorEncounters[hazardRandom:NextInteger(1, #connectorEncounters)]
-		encounter(currentDist)
-		currentDist = currentDist + connectorSpacing()
+		encounter.place(currentDist)
+
+		local spacing = connectorSpacing()
+
+		if encounter.hasTrap then
+			spacing = math.max(spacing, trapClearance)
+		end
+
+		currentDist = currentDist + spacing
 	end
 end
 
 -- Procedural obstacle course for Room A: randomized encounters packed along
--- the hall at dash-friendly spacing (10-14 studs). Reuses existing trap
+-- the hall at dash-friendly spacing (10-14 studs, widened to trapClearance
+-- whenever a spike-trap housing was actually placed). Reuses existing trap
 -- builders only; a fresh RNG each build keeps the route unpredictable.
 local function generateRoomAObstacleCourse(room, entrancePosition, forward, length, width, height)
 	local right = getRight(forward)
 	local leftWallOrigin = entrancePosition - right * (width / 2)
 	local rightWallOrigin = entrancePosition + right * (width / 2)
 	local roomCfg = CONFIG.roomA
-	local hazardRandom = Random.new()
+	-- Same fix as the connector RNG above: a fixed seed makes the whole
+	-- room's hazard layout deterministic across every run and every
+	-- player, instead of reshuffling each time the script executes.
+	local hazardRandom = Random.new(roomCfg.hazardSeed)
 
 	local trapIndex = 1
 	local bladeIndex = 1
@@ -2074,6 +2113,25 @@ local function generateRoomAObstacleCourse(room, entrancePosition, forward, leng
 		)
 		trapIndex = trapIndex + 1
 	end
+
+	-- id -> whether this encounter plants at least one spike-trap
+	-- housing. Every encounter here does except "blade" -- used below to
+	-- widen the post-encounter gap to trapClearance so consecutive traps
+	-- (this was the exact "3 spikes with no gap" bug) can't land closer
+	-- together than their own housings are deep.
+	local encounterHasTrap = {
+		floor = true,
+		ceiling = true,
+		wallLeft = true,
+		wallRight = true,
+		blade = false,
+		floorBlade = true,
+		ceilingBlade = true,
+		opposingWalls = true,
+		crushRight = true,
+		crushLeft = true,
+		doubleCeiling = true,
+	}
 
 	local encounterWeights = {
 		{ id = "floor", weight = 18 },
@@ -2163,8 +2221,8 @@ local function generateRoomAObstacleCourse(room, entrancePosition, forward, leng
 		doubleCeiling = function(dist)
 			placeCeiling(dist)
 
-			if dist + 8 < hazardEnd then
-				placeCeiling(dist + 8)
+			if dist + trapClearance < hazardEnd then
+				placeCeiling(dist + trapClearance)
 			end
 		end,
 	}
@@ -2298,48 +2356,58 @@ local function generateRoomAObstacleCourse(room, entrancePosition, forward, leng
 		local gauntletEnd = math.min(roomCfg.entranceGauntletEnd, hazardEnd - 10)
 		local currentDist = roomCfg.hazardStart
 
+		-- Same hasTrap tagging as connectorEncounters, for the same
+		-- reason: the entrance gauntlet used the tight 8-11 connector
+		-- spacing, which is also below a trap's own housing depth.
 		local gauntletEncounters = {
-			function(dist)
+			{ hasTrap = true, place = function(dist)
 				placeCeiling(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeFloor(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeWallRight(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeWallLeft(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = false, place = function(dist)
 				placeBlade(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeFloor(dist)
 				placeBlade(dist, hazardRandom:NextInteger(-1, 1) * 2)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeCeiling(dist)
 				placeBlade(dist)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeWallRight(dist)
 				placeFloor(dist, -3)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeWallLeft(dist)
 				placeFloor(dist, 3)
-			end,
-			function(dist)
+			end },
+			{ hasTrap = true, place = function(dist)
 				placeWallLeft(dist)
 				placeWallRight(dist)
-			end,
+			end },
 		}
 
 		while currentDist < gauntletEnd do
 			local encounter = gauntletEncounters[hazardRandom:NextInteger(1, #gauntletEncounters)]
-			encounter(currentDist)
-			currentDist = currentDist + entranceSpacing()
+			encounter.place(currentDist)
+
+			local spacing = entranceSpacing()
+
+			if encounter.hasTrap then
+				spacing = math.max(spacing, trapClearance)
+			end
+
+			currentDist = currentDist + spacing
 		end
 
 		return currentDist
@@ -2363,6 +2431,11 @@ local function generateRoomAObstacleCourse(room, entrancePosition, forward, leng
 			encounters[encounterId](currentDist)
 
 			local spacing = nextSpacing()
+
+			if encounterHasTrap[encounterId] then
+				spacing = math.max(spacing, trapClearance)
+			end
+
 			tryPlaceDecor(currentDist + spacing * 0.5)
 			currentDist = currentDist + spacing
 		end
