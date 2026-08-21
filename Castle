@@ -1,0 +1,949 @@
+
+"""
+ARCANE ACADEMY CASTLE — v2 (imperfections fixed)
+============================================================
+WHAT WAS ACTUALLY BROKEN (v1 -> v2):
+
+1. ROOT-CAUSE BUG — add_cube() used primitive_cube_add(size=1, ...) while every
+   call site passed scale.z as a HALF-height (Blender's own convention assumes
+   a size=2 base cube). Net effect: every box-based piece in the whole castle
+   (walls, curtain walls, merlons, stairs, the gate box, banners, signs, the
+   ground) floated ~1/4 of its own height above where it should sit, and fell
+   ~1/4 short of where the next piece (roof, merlons, tower) expected it.
+   That is what produced the gaps / hollow recesses / disconnected-looking
+   pieces in the viewport screenshots. Fixed by using size=2 (one line).
+2. Hard, faceted low-poly shading on every cylinder/cone (8 sides, flat
+   shaded) vs. the smooth, rounded look in the reference art. Bumped default
+   side-count and added auto-smooth shading on every round piece.
+3. Roof cones were plain straight cones. The reference has a flared
+   "fairytale" roof silhouette (flares out just past the eave, then sweeps
+   up to a point). Replaced with a real profile-lofted mesh + a thin gold
+   trim ring at the flare.
+4. Towers had NO real windows on their round bodies (only a small shield
+   plaque). Reference towers show real arched, gold-framed windows on every
+   visible face. Added them, in two rows on the big towers.
+5. The archway/gate cutter unioned two separate booleans before subtracting,
+   which is a classic source of non-manifold shading glitches at the arch
+   tip. Rebuilt as a single watertight cutter (one boolean, not two).
+6. Roof colour was almost black; reference roofs are a rich, visible
+   indigo-blue. Retuned the palette + gave stone a little procedural noise
+   so it doesn't read as flat plastic.
+7. Nothing tied the building bases to the ground visually — added a stone
+   foundation plinth (also matches the "castle on a raised base" look in
+   your reference), turned on ambient occlusion, and warmed/softened the
+   lighting + added a sky gradient instead of a flat colour.
+
+Run this in Blender's Scripting tab (or Text Editor) and press Run Script.
+"""
+
+import bpy
+import math
+
+# ---------------------------------------------------------------------------
+# COLOUR PALETTE  (retuned to sit closer to the reference art)
+# ---------------------------------------------------------------------------
+STONE_COLOR       = (0.86, 0.83, 0.75)
+STONE_DARK_COLOR  = (0.58, 0.55, 0.50)
+ROOF_COLOR        = (0.16, 0.19, 0.44)   # was near-black; now a real indigo-blue
+GOLD_COLOR        = (0.90, 0.70, 0.20)
+WINDOW_COLOR      = (1.00, 0.80, 0.40)
+BANNER_COLOR      = (0.10, 0.14, 0.42)
+WOOD_COLOR        = (0.30, 0.18, 0.10)
+DOOR_COLOR        = (0.25, 0.15, 0.08)
+GROUND_COLOR      = (0.40, 0.55, 0.35)
+PLINTH_COLOR      = (0.50, 0.47, 0.43)
+
+DEFAULT_SIDES = 16   # was 8 — this alone kills most of the faceted look
+
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
+def clear_scene():
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    for block in (bpy.data.meshes, bpy.data.materials, bpy.data.curves,
+                  bpy.data.cameras, bpy.data.lights):
+        for item in list(block):
+            if item.users == 0:
+                block.remove(item)
+
+def shade_smooth_auto(obj, angle_deg=40):
+    """Smooth-shade a round object but keep hard creases above angle_deg
+    (so roof/wall seams etc. still read as crisp edges)."""
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.select_set(True)
+    bpy.ops.object.shade_smooth()
+    try:
+        bpy.ops.object.shade_auto_smooth(angle=math.radians(angle_deg))
+    except Exception:
+        try:
+            obj.data.use_auto_smooth = True
+            obj.data.auto_smooth_angle = math.radians(angle_deg)
+        except Exception:
+            pass
+    return obj
+
+def make_material(name, color, emission=False, emission_strength=3.0,
+                  metallic=0.0, roughness=0.6):
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = (*color, 1.0)
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Metallic"].default_value = metallic
+    if emission:
+        try:
+            bsdf.inputs["Emission Color"].default_value = (*color, 1.0)
+            bsdf.inputs["Emission Strength"].default_value = emission_strength
+        except Exception:
+            bsdf.inputs["Emission"].default_value = (*color, 1.0)
+            bsdf.inputs["Emission Strength"].default_value = emission_strength
+    return mat
+
+def make_stone_material(name, color, roughness=0.8):
+    """Stone with a little procedural noise mixed in, so it doesn't read
+    as flat, uniform plastic the way the original material did."""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = nt.nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = roughness
+    bsdf.inputs["Metallic"].default_value = 0.0
+    noise = nt.nodes.new("ShaderNodeTexNoise")
+    noise.inputs["Scale"].default_value = 14.0
+    noise.inputs["Detail"].default_value = 4.0
+    ramp = nt.nodes.new("ShaderNodeValToRGB")
+    dark = (color[0]*0.80, color[1]*0.80, color[2]*0.80)
+    ramp.color_ramp.elements[0].color = (*dark, 1.0)
+    ramp.color_ramp.elements[1].color = (*color, 1.0)
+    nt.links.new(noise.outputs["Fac"], ramp.inputs["Fac"])
+    nt.links.new(ramp.outputs["Color"], bsdf.inputs["Base Color"])
+    return mat
+
+def new_collection(name):
+    col = bpy.data.collections.new(name)
+    bpy.context.scene.collection.children.link(col)
+    return col
+
+def link_to(obj, collection):
+    for c in list(obj.users_collection):
+        c.objects.unlink(obj)
+    collection.objects.link(obj)
+    return obj
+
+# ---- Primitives (bottom at z) ----
+def add_cylinder(name, radius, depth, location, vertices=DEFAULT_SIDES,
+                 rotation=(0,0,0), smooth=True):
+    x, y, z = location
+    bpy.ops.mesh.primitive_cylinder_add(vertices=vertices, radius=radius, depth=depth,
+                                        location=(x, y, z + depth/2), rotation=rotation)
+    obj = bpy.context.active_object
+    obj.name = name
+    if smooth:
+        shade_smooth_auto(obj)
+    return obj
+
+def add_cone(name, radius1, radius2, depth, location, vertices=DEFAULT_SIDES,
+            rotation=(0,0,0), smooth=True):
+    x, y, z = location
+    bpy.ops.mesh.primitive_cone_add(vertices=vertices, radius1=radius1, radius2=radius2,
+                                    depth=depth, location=(x, y, z + depth/2), rotation=rotation)
+    obj = bpy.context.active_object
+    obj.name = name
+    if smooth:
+        shade_smooth_auto(obj)
+    return obj
+
+def add_cube(name, location, scale=(1,1,1), rotation=(0,0,0)):
+    """FIX: size=2 (Blender's own default half-extent-1 cube) so that
+    scale.z really is a half-height, matching every call site's assumption.
+    With the old size=1 cube every box floated ~1/4-height off the ground
+    and fell ~1/4-height short of the next piece. This one change re-grounds
+    the whole castle."""
+    x, y, z = location
+    bpy.ops.mesh.primitive_cube_add(size=2, location=(x, y, z + scale[2]), rotation=rotation)
+    obj = bpy.context.active_object
+    obj.name = name
+    obj.scale = scale
+    return obj
+
+def add_sphere(name, radius, location, smooth=True):
+    x, y, z = location
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=radius, location=(x, y, z + radius),
+                                         segments=20, ring_count=12)
+    obj = bpy.context.active_object
+    obj.name = name
+    if smooth:
+        shade_smooth_auto(obj)
+    return obj
+
+def apply_mat(obj, mat):
+    if mat:
+        obj.data.materials.append(mat)
+    return obj
+
+# ---- Custom shapes ----
+def build_pyramid_roof_mesh(name, location, size_x, size_y, height,
+                            overhang=0.06, rotation_z=0.0, mat=None, collection=None):
+    x, y, z = location
+    hx, hy = size_x/2 + overhang, size_y/2 + overhang
+    verts = [(hx, hy, 0), (hx, -hy, 0), (-hx, -hy, 0), (-hx, hy, 0), (0, 0, height)]
+    faces = [(0,1,4), (1,2,4), (2,3,4), (3,0,4), (0,3,2,1)]
+    mesh = bpy.data.meshes.new(name+"_mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.location = (x, y, z)
+    obj.rotation_euler = (0, 0, math.radians(rotation_z))
+    apply_mat(obj, mat)
+    if collection: link_to(obj, collection)
+    return obj
+
+def build_tower_roof(name, location, base_radius, height, sides=DEFAULT_SIDES,
+                     overhang=0.22, flare_amount=0.16, mat=None, mat_trim=None,
+                     collection=None):
+    """Fairytale conical roof: flares out just past the wall/eave, then
+    sweeps up to a point, instead of a plain straight cone."""
+    x, y, z = location
+    profile = [
+        (base_radius + overhang * 0.5,  0.0),                  # eave, flush with wall top
+        (base_radius + overhang + flare_amount, height*0.12),  # flare bulge
+        (base_radius * 0.58,            height*0.46),          # sweeping taper
+        (base_radius * 0.20,            height*0.78),          # near tip
+    ]
+    apex_z = height
+
+    verts = []
+    rings = []
+    for (r, hz) in profile:
+        ring = []
+        for i in range(sides):
+            ang = 2 * math.pi * i / sides
+            ring.append(len(verts))
+            verts.append((r*math.cos(ang), r*math.sin(ang), hz))
+        rings.append(ring)
+    apex_index = len(verts)
+    verts.append((0, 0, apex_z))
+
+    faces = []
+    for r0, r1 in zip(rings[:-1], rings[1:]):
+        for i in range(sides):
+            a, b = r0[i], r0[(i+1) % sides]
+            c, d = r1[(i+1) % sides], r1[i]
+            faces.append((a, b, c, d))
+    top_ring = rings[-1]
+    for i in range(sides):
+        a, b = top_ring[i], top_ring[(i+1) % sides]
+        faces.append((a, b, apex_index))
+    bottom_ring = rings[0]
+    faces.append(tuple(reversed(bottom_ring)))
+
+    mesh = bpy.data.meshes.new(name+"_mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.location = (x, y, z)
+    apply_mat(obj, mat)
+    shade_smooth_auto(obj, angle_deg=35)
+    if collection: link_to(obj, collection)
+
+    trim = None
+    if mat_trim is not None:
+        flare_r, flare_hz = profile[1]
+        trim = add_cylinder(f"{name}_trim", flare_r + 0.012, 0.05,
+                            (x, y, z + flare_hz - 0.025), vertices=sides)
+        apply_mat(trim, mat_trim)
+        if collection: link_to(trim, collection)
+    return obj, trim
+
+def build_star_emblem(name, location, radius=0.22, points=8, inner_ratio=0.42,
+                      facing_deg=270.0, mat=None, collection=None):
+    x, y, z = location
+    rad = math.radians(facing_deg)
+    n = points*2
+    verts = []
+    for i in range(n):
+        ang = math.pi*i/points
+        r = radius if i%2==0 else radius*inner_ratio
+        verts.append((0, r*math.cos(ang), r*math.sin(ang)))
+    faces = [tuple(range(n))]
+    mesh = bpy.data.meshes.new(name+"_mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    obj.location = (x, y, z)
+    obj.rotation_euler = (0, 0, rad)
+    apply_mat(obj, mat)
+    if collection: link_to(obj, collection)
+    return obj
+
+def build_pointed_window(name, location, facing_deg, width=0.3, height=0.7,
+                         cap_height=0.2, mat_window=None, mat_frame=None,
+                         collection=None):
+    """Gold-framed arched window: gold sill, blue-glow glass pane, gold
+    pointed cap. mat_frame defaults to mat_window for backward compatibility,
+    but pass mat_gold in for the reference-matching look."""
+    x, y, z = location
+    rad = math.radians(facing_deg)
+    frame_mat = mat_frame if mat_frame is not None else mat_window
+    objs = []
+
+    sill = add_cube(f"{name}_sill", (x, y, z - height/2 - 0.03),
+                    scale=(0.05, width/2 + 0.05, 0.03), rotation=(0,0,rad))
+    apply_mat(sill, frame_mat)
+    objs.append(sill)
+
+    pane = add_cube(f"{name}_pane", (x, y, z - height/2), scale=(0.035, width/2, height/2),
+                    rotation=(0,0,rad))
+    apply_mat(pane, mat_window)
+    objs.append(pane)
+
+    cap = build_pyramid_roof_mesh(f"{name}_cap", (x, y, z + height/2),
+                                  width, 0.07, cap_height, overhang=0,
+                                  rotation_z=facing_deg+90, mat=frame_mat)
+    objs.append(cap)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_wall_plaque(name, location, facing_deg, width=0.34, height=0.95,
+                      mat_gold=None, mat_navy=None, mat_window=None, collection=None):
+    x, y, z = location
+    rad = math.radians(facing_deg)
+    objs = []
+
+    def shield_obj(mesh_name, w, h, x_off):
+        verts = [
+            (0.0, 0.0, h * 0.5),
+            (0.0, w / 2, h * 0.18),
+            (0.0, w / 2, -h * 0.5),
+            (0.0, 0.0, -h * 0.5),
+            (0.0, -w / 2, -h * 0.5),
+            (0.0, -w / 2, h * 0.18),
+        ]
+        faces = [tuple(range(6))]
+        mesh = bpy.data.meshes.new(mesh_name + "_mesh")
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new(mesh_name, mesh)
+        bpy.context.collection.objects.link(obj)
+        obj.location = (x + math.cos(rad) * x_off, y + math.sin(rad) * x_off, z)
+        obj.rotation_euler = (0, 0, rad)
+        return obj
+
+    gold_backing = shield_obj(f"{name}_gold", width, height, 0.006)
+    apply_mat(gold_backing, mat_gold)
+    objs.append(gold_backing)
+
+    navy_face = shield_obj(f"{name}_navy", width * 0.78, height * 0.86, 0.014)
+    apply_mat(navy_face, mat_navy)
+    objs.append(navy_face)
+
+    win = add_cube(f"{name}_win",
+                   (x + math.cos(rad) * 0.024, y + math.sin(rad) * 0.024, z + height * 0.22),
+                   scale=(0.02, width * 0.16, height * 0.12), rotation=(0, 0, rad))
+    apply_mat(win, mat_window)
+    objs.append(win)
+
+    if collection:
+        for o in objs:
+            link_to(o, collection)
+    return objs
+
+def add_tower_plaque(name, tower_xy, base_radius, wall_height, mat_gold, mat_navy,
+                     mat_window, facing_deg=270.0, scale=1.0, collection=None):
+    x, y = tower_xy
+    rad = math.radians(facing_deg)
+    px = x + math.cos(rad) * (base_radius + 0.01)
+    py = y + math.sin(rad) * (base_radius + 0.01)
+    pz = wall_height * 0.5
+    return build_wall_plaque(f"{name}_plaque", (px, py, pz), facing_deg,
+                             width=base_radius * 0.7 * scale,
+                             height=wall_height * 0.42 * scale,
+                             mat_gold=mat_gold, mat_navy=mat_navy,
+                             mat_window=mat_window, collection=collection)
+
+# ---- Building blocks ----
+def build_tower(name, location, base_radius=1.5, wall_height=8.0, roof_height=4.0,
+                roof_overhang=0.3, sides=DEFAULT_SIDES, has_spire=True, spire_height=1.5,
+                mat_wall=None, mat_roof=None, mat_gold=None, window_rows=None,
+                mat_window=None, has_belt=True, has_base_trim=True,
+                mat_wall_dark=None, collection=None):
+    """window_rows: list of (z_fraction, [angles_deg]) tuples, each placing a
+    real gold-framed arched window on the tower body at that height/angle."""
+    x, y, z = location
+    objs = []
+
+    if has_base_trim and mat_wall_dark is not None:
+        base_trim = add_cylinder(f"{name}_basetrim", base_radius + 0.03, 0.35,
+                                 (x, y, z), vertices=sides)
+        apply_mat(base_trim, mat_wall_dark); objs.append(base_trim)
+
+    body = add_cylinder(f"{name}_body", base_radius, wall_height, (x,y,z), vertices=sides)
+    apply_mat(body, mat_wall); objs.append(body)
+
+    if has_belt:
+        belt = add_cylinder(f"{name}_belt", base_radius+0.05, 0.1, (x,y,z+wall_height-0.05), vertices=sides)
+        apply_mat(belt, mat_gold); objs.append(belt)
+
+    roof, roof_trim = build_tower_roof(f"{name}_roof", (x, y, z + wall_height),
+                                       base_radius, roof_height, sides=sides,
+                                       overhang=roof_overhang, mat=mat_roof,
+                                       mat_trim=mat_gold, collection=None)
+    objs.append(roof)
+    if roof_trim: objs.append(roof_trim)
+
+    if has_spire:
+        spire = add_cylinder(f"{name}_spire", 0.05, spire_height,
+                             (x,y,z+wall_height+roof_height), vertices=8)
+        apply_mat(spire, mat_gold); objs.append(spire)
+        finial = add_sphere(f"{name}_finial", 0.09, (x,y,z+wall_height+roof_height+spire_height))
+        apply_mat(finial, mat_gold); objs.append(finial)
+
+    if window_rows:
+        for row_i, (zf, angles) in enumerate(window_rows):
+            for i, ang in enumerate(angles):
+                rad = math.radians(ang)
+                wr = base_radius + 0.02
+                wx = x + wr*math.cos(rad); wy = y + wr*math.sin(rad)
+                win = build_pointed_window(
+                    f"{name}_win_{row_i}_{i}", (wx, wy, z + wall_height*zf),
+                    facing_deg=ang, width=base_radius*0.36,
+                    height=wall_height*0.20, cap_height=base_radius*0.26,
+                    mat_window=mat_window, mat_frame=mat_gold)
+                objs.extend(win)
+
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_hip_roof_building(name, location, size_x, size_y, wall_height, roof_height,
+                            mat_wall=None, mat_roof=None, collection=None):
+    x, y, z = location
+    objs = []
+    wall = add_cube(f"{name}_wall", (x,y,z), scale=(size_x/2, size_y/2, wall_height/2))
+    apply_mat(wall, mat_wall); objs.append(wall)
+    roof = build_pyramid_roof_mesh(f"{name}_roof", (x, y, z + wall_height),
+                                   size_x, size_y, roof_height, mat=mat_roof)
+    objs.append(roof)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_window_row(name, center, facing_deg, span, count, z, offset_from_wall,
+                     width=0.18, height=0.36, cap_height=0.13,
+                     mat_window=None, mat_frame=None, collection=None):
+    objs = []
+    x, y = center
+    rad = math.radians(facing_deg)
+    along_x, along_y = -math.sin(rad), math.cos(rad)
+    out_x, out_y = math.cos(rad), math.sin(rad)
+    for i in range(count):
+        t = (i + 0.5) / count - 0.5
+        wx = x + along_x * t * span + out_x * offset_from_wall
+        wy = y + along_y * t * span + out_y * offset_from_wall
+        win = build_pointed_window(f"{name}_win_{i}", (wx, wy, z), facing_deg,
+                                   width=width, height=height, cap_height=cap_height,
+                                   mat_window=mat_window, mat_frame=mat_frame)
+        objs.extend(win)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_house_profile_cutter(name, width, depth, straight_height, point_height):
+    """A single watertight prism shaped like a doorway silhouette (rectangle
+    + pointed cap). Used as ONE boolean cutter, replacing the old
+    union-then-difference approach that could leave non-manifold geometry
+    (and visible shading glitches) right at the arch tip."""
+    hx = width / 2
+    hy = depth / 2
+    prof = [(-hx, 0.0), (hx, 0.0), (hx, straight_height),
+            (0.0, straight_height + point_height), (-hx, straight_height)]
+    n = len(prof)
+    front = [(px, -hy, pz) for (px, pz) in prof]
+    back  = [(px,  hy, pz) for (px, pz) in prof]
+    verts = front + back
+    faces = [tuple(range(n-1, -1, -1)), tuple(range(n, 2*n))]
+    for i in range(n):
+        a, b = i, (i+1) % n
+        faces.append((a, b, n+b, n+a))
+    mesh = bpy.data.meshes.new(name+"_mesh")
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+def build_gate(name, location, width=2.2, height=3.2, depth=0.9, point_ratio=0.4,
+               mat_wall=None, collection=None):
+    x, y, z = location
+    wall = add_cube(f"{name}_wall", (x,y,z), scale=(width/2, depth/2, height/2))
+    apply_mat(wall, mat_wall)
+    straight_h = height * (1.0 - point_ratio)
+    point_h = height * point_ratio
+    cutter = build_house_profile_cutter(f"{name}_cutter", width*0.68, depth*1.6,
+                                        straight_h, point_h)
+    cutter.location = (x, y, z)
+    mod = wall.modifiers.new("arch_cut", 'BOOLEAN')
+    mod.operation = 'DIFFERENCE'
+    try:
+        mod.solver = 'EXACT'
+    except Exception:
+        pass
+    mod.object = cutter
+    bpy.context.view_layer.objects.active = wall
+    bpy.ops.object.modifier_apply(modifier="arch_cut")
+    bpy.data.objects.remove(cutter, do_unlink=True)
+    if collection:
+        link_to(wall, collection)
+    return wall
+
+def build_wall_segment(name, location, length, height=2.4, thickness=0.55,
+                       facing_deg=0.0, mat_wall=None, mat_merlon=None, collection=None):
+    x, y, z = location
+    rad = math.radians(facing_deg)
+    wall = add_cube(f"{name}_wall", (x,y,z), scale=(length/2, thickness/2, height/2),
+                    rotation=(0,0,rad))
+    apply_mat(wall, mat_wall)
+    objs = [wall]
+    along_x, along_y = math.cos(rad), math.sin(rad)
+    merlon_count = max(3, int(length / 0.55))
+    for i in range(merlon_count):
+        t = (i + 0.5) / merlon_count - 0.5
+        mx = x + along_x * t * length
+        my = y + along_y * t * length
+        m = add_cube(f"{name}_merlon_{i}", (mx, my, z + height),
+                     scale=(0.16, thickness/2 * 0.85, 0.28), rotation=(0,0,rad))
+        apply_mat(m, mat_merlon)
+        objs.append(m)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_stairs(name, location, num_steps=7, step_w=2.8, step_d=0.296, step_h=0.135,
+                 direction=(0,1), mat_step=None, collection=None):
+    objs = []
+    x, y, z = location
+    dx, dy = direction
+    for i in range(num_steps):
+        sx = x + dx * i * step_d
+        sy = y + dy * i * step_d
+        sz = z + i * step_h
+        s = add_cube(f"{name}_step_{i}", (sx, sy, sz),
+                     scale=(step_w/2, step_d/2, step_h/2))
+        apply_mat(s, mat_step)
+        objs.append(s)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_banner(name, location, height=1.7, width=0.45, mat_pole=None,
+                 mat_cloth=None, mat_gold=None, facing_deg=0.0, collection=None):
+    x, y, z = location
+    rad = math.radians(facing_deg)
+    objs = []
+    pole = add_cylinder(f"{name}_pole", 0.028, height+0.6, (x,y,z), vertices=8)
+    apply_mat(pole, mat_pole); objs.append(pole)
+    off_x = math.cos(rad)*(width/2+0.03); off_y = math.sin(rad)*(width/2+0.03)
+    cloth = add_cube(f"{name}_cloth", (x+off_x, y+off_y, z+0.25),
+                     scale=(width/2, 0.01, height/2), rotation=(0,0,rad))
+    apply_mat(cloth, mat_cloth); objs.append(cloth)
+    emblem = build_star_emblem(f"{name}_emblem",
+                               (x+off_x*1.05, y+off_y*1.05, z+0.25+height*0.7),
+                               radius=width*0.34, points=8, inner_ratio=0.45,
+                               facing_deg=facing_deg, mat=mat_gold)
+    objs.append(emblem)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_lamp_post(name, location, mat_pole=None, mat_light=None, collection=None):
+    x, y, z = location
+    pole = add_cylinder(f"{name}_pole", 0.03, 0.9, (x,y,z), vertices=8)
+    apply_mat(pole, mat_pole)
+    lamp = add_sphere(f"{name}_light", 0.08, (x,y,z+0.9))
+    apply_mat(lamp, mat_light)
+    if collection:
+        link_to(pole, collection)
+        link_to(lamp, collection)
+    return [pole, lamp]
+
+def build_sign(name, location, mat_board=None, mat_wood=None, mat_gold=None, collection=None):
+    x, y, z = location
+    objs = []
+    board_trim = add_cube(f"{name}_board_trim", (x, y+0.01, z+1.0), scale=(1.42,0.06,0.97))
+    apply_mat(board_trim, mat_gold); objs.append(board_trim)
+    board = add_cube(f"{name}_board", (x, y, z+1.0), scale=(1.35,0.08,0.9))
+    apply_mat(board, mat_board); objs.append(board)
+    for dx in (-1.15, 1.15):
+        post = add_cube(f"{name}_post_{dx}", (x+dx, y, z+0.45), scale=(0.08,0.08,0.85))
+        apply_mat(post, mat_wood); objs.append(post)
+    roof_cap = build_pyramid_roof_mesh(f"{name}_cap", (x, y, z+1.44),
+                                       size_x=1.55, size_y=0.4, height=0.4,
+                                       overhang=0.05, mat=mat_wood)
+    objs.append(roof_cap)
+    bpy.ops.object.text_add(location=(x, y-0.09, z+1.0),
+                            rotation=(math.radians(90), 0, 0))
+    txt = bpy.context.active_object
+    txt.name = f"{name}_text"
+    txt.data.body = "ARCANE\nACADEMY"
+    txt.data.align_x = 'CENTER'
+    txt.data.align_y = 'CENTER'
+    txt.data.size = 0.28
+    txt.data.extrude = 0.015
+    apply_mat(txt, mat_gold)
+    objs.append(txt)
+    emblem = build_star_emblem(f"{name}_emblem", (x, y-0.1, z+1.45),
+                               radius=0.18, points=8, inner_ratio=0.45,
+                               facing_deg=270, mat=mat_gold)
+    objs.append(emblem)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_keep_battlements(name, center, size_x, size_y, wall_height, mat_merlon=None, collection=None):
+    """Add a row of merlons on top of the keep walls (4 sides). center is (x,y,z)"""
+    x, y, z = center
+    objs = []
+    for sign_y in (-1, 1):
+        y_pos = y + sign_y * (size_y/2)
+        count = max(3, int(size_x / 0.55))
+        for i in range(count):
+            t = (i + 0.5) / count - 0.5
+            mx = x + t * size_x
+            m = add_cube(f"{name}_merlon_{'f' if sign_y>0 else 'b'}_{i}",
+                         (mx, y_pos, z + wall_height),
+                         scale=(0.16, 0.2, 0.28))
+            apply_mat(m, mat_merlon)
+            objs.append(m)
+    for sign_x in (-1, 1):
+        x_pos = x + sign_x * (size_x/2)
+        count = max(3, int(size_y / 0.55))
+        for i in range(count):
+            t = (i + 0.5) / count - 0.5
+            my = y + t * size_y
+            m = add_cube(f"{name}_merlon_{'l' if sign_x>0 else 'r'}_{i}",
+                         (x_pos, my, z + wall_height),
+                         scale=(0.2, 0.16, 0.28))
+            apply_mat(m, mat_merlon)
+            objs.append(m)
+    if collection:
+        for o in objs: link_to(o, collection)
+    return objs
+
+def build_plinth(name, footprint_center, size_x, size_y, height=0.16, mat=None, collection=None):
+    """A low stone foundation slab under the whole footprint. Its top sits a
+    little above the ground plane so it visually grounds every tower/wall
+    base instead of leaving a hard, floating-looking edge."""
+    x, y = footprint_center
+    slab = add_cube(name, (x, y, 0.0), scale=(size_x/2, size_y/2, height/2))
+    apply_mat(slab, mat)
+    if collection: link_to(slab, collection)
+    return slab
+
+def join_all_meshes(collection_name="ArcaneAcademyCastle"):
+    col = bpy.data.collections.get(collection_name)
+    if not col: return
+    objs = [o for o in col.objects if o.type == 'MESH']
+    if not objs: return
+    bpy.context.view_layer.objects.active = objs[0]
+    bpy.ops.object.select_all(action='DESELECT')
+    for o in objs: o.select_set(True)
+    bpy.ops.object.join()
+    bpy.context.active_object.name = "ArcaneAcademyCastle_Combined"
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+def main():
+    clear_scene()
+    castle_col = new_collection("ArcaneAcademyCastle")
+
+    mat_stone      = make_stone_material("Stone", STONE_COLOR, roughness=0.75)
+    mat_stone_dark = make_stone_material("StoneDark", STONE_DARK_COLOR, roughness=0.8)
+    mat_roof       = make_material("RoofTile", ROOF_COLOR, roughness=0.32)
+    mat_gold       = make_material("Gold", GOLD_COLOR, metallic=1.0, roughness=0.25)
+    mat_window     = make_material("WindowGlow", WINDOW_COLOR, emission=True,
+                                   emission_strength=4.0, roughness=0.3)
+    mat_banner     = make_material("BannerCloth", BANNER_COLOR, roughness=0.9)
+    mat_wood       = make_material("Wood", WOOD_COLOR, roughness=0.8)
+    mat_door       = make_material("Door", DOOR_COLOR, roughness=0.7)
+    mat_ground     = make_material("Ground", GROUND_COLOR, roughness=1.0)
+    mat_plinth     = make_stone_material("Plinth", PLINTH_COLOR, roughness=0.85)
+
+    # ---- GROUND (top at z=0) ----
+    ground = add_cube("ground_optional", (0, 1.0, -0.6), scale=(16.0, 14.0, 0.3))
+    apply_mat(ground, mat_ground)
+    link_to(ground, castle_col)
+
+    # ---- FOUNDATION PLINTH (ties every base to the ground) ----
+    build_plinth("castle_plinth", (0, 1.2), size_x=12.8, size_y=10.4, height=0.16,
+                mat=mat_plinth, collection=castle_col)
+
+    # ---- CENTRAL SPIRE ----
+    build_tower("central_spire", (0, 4.3, 0), base_radius=1.4, wall_height=9.2,
+                roof_height=6.3, spire_height=2.4, sides=DEFAULT_SIDES, mat_wall=mat_stone,
+                mat_roof=mat_roof, mat_gold=mat_gold, mat_window=mat_window,
+                mat_wall_dark=mat_stone_dark,
+                window_rows=[(0.30, [270]), (0.62, [250, 270, 290])],
+                collection=castle_col)
+    add_tower_plaque("central_spire", (0, 4.3), 1.4, 9.2, mat_gold, mat_banner,
+                     mat_window, scale=1.15, collection=castle_col)
+
+    # ---- SPIRE CORNER PINNACLES ----
+    for sign in (-1,1):
+        build_tower(f"spire_corner_{'L' if sign<0 else 'R'}",
+                    (sign*1.05, 3.95, 0), base_radius=0.4, wall_height=4.6,
+                    roof_height=2.7, spire_height=0.75, sides=DEFAULT_SIDES, mat_wall=mat_stone,
+                    mat_roof=mat_roof, mat_gold=mat_gold, mat_window=mat_window,
+                    mat_wall_dark=mat_stone_dark,
+                    window_rows=[(0.55, [270])], collection=castle_col)
+        add_tower_plaque(f"spire_corner_{'L' if sign<0 else 'R'}", (sign*1.05, 3.95),
+                         0.4, 4.6, mat_gold, mat_banner, mat_window, scale=0.7,
+                         collection=castle_col)
+
+    # ---- SECONDARY WIDE TOWER ----
+    build_tower("central_sub", (0, 3.85, 0), base_radius=2.0, wall_height=5.0,
+                roof_height=3.5, spire_height=0.0, has_spire=False, sides=DEFAULT_SIDES,
+                mat_wall=mat_stone, mat_roof=mat_roof, mat_gold=mat_gold,
+                mat_window=mat_window, mat_wall_dark=mat_stone_dark,
+                window_rows=[(0.55, [270])], collection=castle_col)
+
+    # ---- COMPASS-STAR (central facade) ----
+    build_star_emblem("central_star_emblem", (0, 1.73, 3.65), radius=0.4, points=8,
+                      inner_ratio=0.42, facing_deg=270, mat=mat_gold,
+                      collection=castle_col)
+
+    # ---- MAIN KEEP (with battlements) ----
+    keep_z = 0
+    build_hip_roof_building("keep_main", (0, 3.3, keep_z), size_x=5.4, size_y=2.6,
+                            wall_height=4.8, roof_height=2.6, mat_wall=mat_stone,
+                            mat_roof=mat_roof, collection=castle_col)
+    build_keep_battlements("keep_main", (0, 3.3, keep_z), 5.4, 2.6, 4.8,
+                           mat_merlon=mat_stone, collection=castle_col)
+
+    build_window_row("keep_main_upper", (0, 3.3), facing_deg=270, span=4.6, count=5,
+                     z=2.9, offset_from_wall=1.34, mat_window=mat_window,
+                     mat_frame=mat_gold, collection=castle_col)
+    build_window_row("keep_main_lower", (0, 3.3), facing_deg=270, span=4.2, count=5,
+                     z=1.4, offset_from_wall=1.34, width=0.16, height=0.32,
+                     cap_height=0.11, mat_window=mat_window, mat_frame=mat_gold,
+                     collection=castle_col)
+
+    # ---- INNER TOWERS ----
+    for sign in (-1,1):
+        tname = f"inner_tower_{'L' if sign<0 else 'R'}"
+        tpos = (sign*1.95, 3.05, 0)
+        build_tower(tname, tpos, base_radius=0.95, wall_height=6.5,
+                    roof_height=4.3, spire_height=1.35, sides=DEFAULT_SIDES, mat_wall=mat_stone,
+                    mat_roof=mat_roof, mat_gold=mat_gold, mat_window=mat_window,
+                    mat_wall_dark=mat_stone_dark,
+                    window_rows=[(0.30, [255, 285]), (0.62, [270])],
+                    collection=castle_col)
+        add_tower_plaque(tname, (tpos[0], tpos[1]), 0.95, 6.5, mat_gold, mat_banner,
+                         mat_window, scale=0.9, collection=castle_col)
+
+    # ---- MID WINGS ----
+    for sign in (-1,1):
+        cx = sign*3.3
+        build_hip_roof_building(f"wing_{'L' if sign<0 else 'R'}", (cx, 2.6, 0),
+                                size_x=2.3, size_y=2.1, wall_height=3.3,
+                                roof_height=2.3, mat_wall=mat_stone, mat_roof=mat_roof,
+                                collection=castle_col)
+        build_window_row(f"wing_{'L' if sign<0 else 'R'}", (cx, 2.6), facing_deg=270,
+                         span=1.7, count=2, z=2.1, offset_from_wall=1.08,
+                         mat_window=mat_window, mat_frame=mat_gold, collection=castle_col)
+
+    # ---- OUTER CORNER TOWERS ----
+    for sign in (-1,1):
+        tname = f"outer_tower_{'L' if sign<0 else 'R'}"
+        tpos = (sign*4.6, 1.6, 0)
+        build_tower(tname, tpos, base_radius=1.0, wall_height=6.7,
+                    roof_height=4.5, spire_height=1.35, sides=DEFAULT_SIDES, mat_wall=mat_stone,
+                    mat_roof=mat_roof, mat_gold=mat_gold, mat_window=mat_window,
+                    mat_wall_dark=mat_stone_dark,
+                    window_rows=[(0.28, [250, 270, 290]), (0.60, [270])],
+                    collection=castle_col)
+        add_tower_plaque(tname, (tpos[0], tpos[1]), 1.0, 6.7, mat_gold, mat_banner,
+                         mat_window, scale=0.95, collection=castle_col)
+
+    # ---- FRONT TURRETS ----
+    for sign in (-1,1):
+        tname = f"front_turret_{'L' if sign<0 else 'R'}"
+        tpos = (sign*5.9, -0.2, 0)
+        build_tower(tname, tpos, base_radius=0.6, wall_height=4.3,
+                    roof_height=2.8, spire_height=0.9, sides=DEFAULT_SIDES, mat_wall=mat_stone,
+                    mat_roof=mat_roof, mat_gold=mat_gold, mat_window=mat_window,
+                    mat_wall_dark=mat_stone_dark,
+                    window_rows=[(0.5, [270])], collection=castle_col)
+        add_tower_plaque(tname, (tpos[0], tpos[1]), 0.6, 4.3, mat_gold, mat_banner,
+                         mat_window, scale=0.75, collection=castle_col)
+
+    # ---- ENTRANCE PORCH (elevated to match stairs) ----
+    stair_top_z = 7 * 0.135  # = 0.945
+    porch_z = stair_top_z
+    build_hip_roof_building("entrance_porch", (0, 1.5, porch_z), size_x=2.6, size_y=1.6,
+                            wall_height=2.8, roof_height=1.9, mat_wall=mat_stone,
+                            mat_roof=mat_roof, collection=castle_col)
+    build_gate("front_door", (0, 0.72, porch_z), width=1.1, height=2.1, depth=0.5,
+               mat_wall=mat_door, collection=castle_col)
+    build_pointed_window("porch_window", (0, 0.72, porch_z + 2.45), facing_deg=270,
+                         width=0.7, height=0.9, cap_height=0.32,
+                         mat_window=mat_window, mat_frame=mat_gold, collection=castle_col)
+
+    # ---- STAIRS (7 steps, ends at y≈0.72 and z=porch_z) ----
+    build_stairs("main_stairs", (0, -1.35, 0), num_steps=7, step_w=2.8,
+                 step_d=0.296, step_h=0.135, direction=(0,1),
+                 mat_step=mat_stone_dark, collection=castle_col)
+
+    # ---- GATEHOUSE & CURTAIN WALLS ----
+    build_gate("main_gate", (0, -1.95, 0), width=2.2, height=3.0, depth=0.85,
+               mat_wall=mat_stone_dark, collection=castle_col)
+
+    for sign in (-1,1):
+        build_tower(f"gate_tower_{'L' if sign<0 else 'R'}",
+                    (sign*1.75, -1.95, 0), base_radius=0.6, wall_height=3.4,
+                    roof_height=1.7, spire_height=0.6, sides=DEFAULT_SIDES,
+                    mat_wall=mat_stone_dark, mat_roof=mat_roof, mat_gold=mat_gold,
+                    mat_window=mat_window, mat_wall_dark=mat_stone_dark,
+                    window_rows=[(0.5, [270])], collection=castle_col)
+
+    # Curtain walls (gate -> outer towers)
+    for sign in (-1,1):
+        x_pos = sign*1.75
+        start_y = -1.95 + 0.6
+        end_y   = 1.6 - 1.0
+        length = end_y - start_y
+        mid_y = (start_y + end_y)/2
+        build_wall_segment(f"curtain_wall_{'L' if sign<0 else 'R'}_front",
+                           (x_pos, mid_y, 0),
+                           length=length, height=2.3, thickness=0.5, facing_deg=90,
+                           mat_wall=mat_stone_dark, mat_merlon=mat_stone,
+                           collection=castle_col)
+
+    # ---- EXTRA STAR EMBLEMS on the curtain walls ----
+    for sign in (-1,1):
+        build_star_emblem(f"curtain_star_{'L' if sign<0 else 'R'}",
+                          (sign*1.75, 0.0, 1.15),
+                          radius=0.25, points=8, inner_ratio=0.42,
+                          facing_deg=90, mat=mat_gold, collection=castle_col)
+
+    # ---- EXTRA BANNERS on outer towers ----
+    for sign in (-1,1):
+        build_banner(f"banner_outer_{'L' if sign<0 else 'R'}",
+                     (sign*4.6, 2.0, 0), facing_deg=90 if sign>0 else -90,
+                     mat_pole=mat_wood, mat_cloth=mat_banner, mat_gold=mat_gold,
+                     collection=castle_col)
+
+    # ---- BANNERS at gate and porch ----
+    build_banner("banner_gate_L", (-1.15, -1.7, 0), facing_deg=180, mat_pole=mat_wood,
+                 mat_cloth=mat_banner, mat_gold=mat_gold, collection=castle_col)
+    build_banner("banner_gate_R", (1.15, -1.7, 0), facing_deg=0, mat_pole=mat_wood,
+                 mat_cloth=mat_banner, mat_gold=mat_gold, collection=castle_col)
+    build_banner("banner_porch_L", (-1.5, 0.9, porch_z), facing_deg=180, mat_pole=mat_wood,
+                 mat_cloth=mat_banner, mat_gold=mat_gold, collection=castle_col)
+    build_banner("banner_porch_R", (1.5, 0.9, porch_z), facing_deg=0, mat_pole=mat_wood,
+                 mat_cloth=mat_banner, mat_gold=mat_gold, collection=castle_col)
+
+    # ---- LAMP POSTS ----
+    build_lamp_post("lamp_stairs_L", (-1.5, -0.7, 0), mat_pole=mat_wood,
+                    mat_light=mat_window, collection=castle_col)
+    build_lamp_post("lamp_stairs_R", (1.5, -0.7, 0), mat_pole=mat_wood,
+                    mat_light=mat_window, collection=castle_col)
+    build_lamp_post("lamp_gate_L", (-0.9, -1.5, 0), mat_pole=mat_wood,
+                    mat_light=mat_window, collection=castle_col)
+    build_lamp_post("lamp_gate_R", (0.9, -1.5, 0), mat_pole=mat_wood,
+                    mat_light=mat_window, collection=castle_col)
+
+    # ---- SIGNPOST ----
+    build_sign("academy_sign", (5.2, -2.6, 0), mat_board=mat_banner,
+               mat_wood=mat_wood, mat_gold=mat_gold, collection=castle_col)
+
+    # ---- CAMERA & LIGHTS ----
+    bpy.ops.object.camera_add(location=(0, -10.5, 6.2),
+                              rotation=(math.radians(72), 0, 0))
+    cam = bpy.context.active_object
+    cam.name = "Castle_Camera"
+    bpy.context.scene.camera = cam
+    link_to(cam, castle_col)
+
+    bpy.ops.object.light_add(type='SUN', location=(6, -6, 12))
+    sun = bpy.context.active_object
+    sun.name = "Key_Sun"
+    sun.data.energy = 3.2
+    sun.data.color = (1.0, 0.95, 0.85)   # slightly warm key light
+    sun.data.angle = math.radians(2.0)   # softer shadow edges
+    sun.rotation_euler = (math.radians(55), 0, math.radians(35))
+    link_to(sun, castle_col)
+
+    bpy.ops.object.light_add(type='SUN', location=(-6, 4, 8))
+    fill = bpy.context.active_object
+    fill.name = "Fill_Sun"
+    fill.data.energy = 0.8
+    fill.data.color = (0.75, 0.85, 1.0)   # cool bounce fill
+    fill.rotation_euler = (math.radians(110), 0, math.radians(-40))
+    link_to(fill, castle_col)
+
+    # ---- WORLD SKY (vertical gradient instead of flat colour) ----
+    world = bpy.context.scene.world
+    if world is None:
+        world = bpy.data.worlds.new("World")
+        bpy.context.scene.world = world
+    world.use_nodes = True
+    nt = world.node_tree
+    bg = nt.nodes.get("Background")
+    for n in list(nt.nodes):
+        if n.type in ('TEX_COORD', 'TEX_GRADIENT', 'VALTORGB') and n.name.startswith("Sky_"):
+            nt.nodes.remove(n)
+    if bg:
+        coord = nt.nodes.new("ShaderNodeTexCoord"); coord.name = "Sky_Coord"
+        grad = nt.nodes.new("ShaderNodeTexGradient"); grad.name = "Sky_Grad"
+        grad.gradient_type = 'LINEAR'
+        ramp = nt.nodes.new("ShaderNodeValToRGB"); ramp.name = "Sky_Ramp"
+        ramp.color_ramp.elements[0].position = 0.0
+        ramp.color_ramp.elements[0].color = (0.80, 0.88, 0.98, 1.0)   # horizon
+        ramp.color_ramp.elements[1].position = 1.0
+        ramp.color_ramp.elements[1].color = (0.30, 0.55, 0.90, 1.0)   # zenith
+        nt.links.new(coord.outputs["Generated"], grad.inputs["Vector"])
+        nt.links.new(grad.outputs["Color"], ramp.inputs["Fac"])
+        nt.links.new(ramp.outputs["Color"], bg.inputs["Color"])
+        bg.inputs[1].default_value = 1.0
+
+    # ---- EEVEE + BLOOM + AO ----
+    try:
+        bpy.context.scene.render.engine = 'BLENDER_EEVEE_NEXT'
+    except Exception:
+        try:
+            bpy.context.scene.render.engine = 'BLENDER_EEVEE'
+        except Exception:
+            pass
+    try:
+        bpy.context.scene.eevee.use_bloom = True
+    except Exception:
+        pass
+    try:
+        bpy.context.scene.eevee.use_gtao = True
+        bpy.context.scene.eevee.gtao_distance = 0.6
+    except Exception:
+        pass
+
+    # ---- AUTO-SWITCH TO MATERIAL PREVIEW ----
+    for area in bpy.context.screen.areas:
+        if area.type == 'VIEW_3D':
+            for space in area.spaces:
+                if space.type == 'VIEW_3D':
+                    space.shading.type = 'MATERIAL'
+                    break
+
+    print("Castle v2 built — grounded, smooth-shaded, windowed towers, gold trim.")
+    print("Press Numpad-0 for camera view.")
+
+    # ---- UNCOMMENT TO JOIN ----
+    # join_all_meshes("ArcaneAcademyCastle")
+
+if __name__ == "__main__":
+    main()
