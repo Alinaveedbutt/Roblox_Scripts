@@ -1,0 +1,814 @@
+-- TrialChamberGolemController
+-- Place this script in ServerScriptService
+
+local ServerStorage = game:GetService("ServerStorage")
+local Workspace = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+
+local TrialChamberGolemController = {}
+
+-- State
+local encounterActive = false
+local encounterPhase = 0
+
+local spawnedGolems = {
+	GreenGolem = nil,
+	SkeliGolem = nil,
+	StoneGolem = nil
+}
+
+local phase1Defeated = {
+	GreenGolem = false,
+	SkeliGolem = false
+}
+
+-- Locate Room B and Spawn Points
+local function getRoomB()
+	local generatedChamber = Workspace:FindFirstChild("TrialChamberGeneratedV5_Sky")
+	if not generatedChamber then return nil end
+	return generatedChamber:FindFirstChild("RoomB")
+end
+
+local function getSpawnPoint(spawnName)
+	local roomB = getRoomB()
+	if not roomB then return nil end
+
+	local spawnFolder = roomB:FindFirstChild("GolemSpawnPoints")
+	if not spawnFolder then return nil end
+
+	return spawnFolder:FindFirstChild(spawnName)
+end
+
+local function getGolemTemplate(golemName)
+	local templateFolder = ServerStorage:FindFirstChild("TrialChamberGolems")
+	if not templateFolder then 
+		warn("[ROOM B ERROR] Could not find ServerStorage.TrialChamberGolems!")
+		return nil 
+	end
+	return templateFolder:FindFirstChild(golemName)
+end
+
+-- Cleanup Active Golems
+function TrialChamberGolemController.CleanupAllGolems()
+	for key, golem in pairs(spawnedGolems) do
+		if golem then
+			golem:Destroy()
+		end
+		spawnedGolems[key] = nil
+	end
+	phase1Defeated = { GreenGolem = false, SkeliGolem = false }
+end
+
+-- Reset Encounter
+function TrialChamberGolemController.ResetEncounter()
+	print("[GolemController] Resetting Encounter...")
+	encounterActive = false
+	encounterPhase = 0
+	TrialChamberGolemController.CleanupAllGolems()
+end
+
+-- Rig Diagnostic Function
+local function diagnoseRig(rig, label)
+	-- Omitted for brevity in these logs to focus on spawning chain
+end
+
+-- Discover the root and stabilize
+local function discoverAndStabilizeRoot(rig)
+	print("[ROOM B ROOT] Inspecting " .. rig.Name)
+	if rig.PrimaryPart then
+		print("[ROOM B ROOT] " .. rig.Name .. " PrimaryPart = " .. rig.PrimaryPart.Name)
+	else
+		print("[ROOM B ROOT] " .. rig.Name .. " PrimaryPart = nil")
+	end
+
+	local char1 = rig:FindFirstChild("char1")
+	if char1 then
+		print("[ROOM B ROOT] " .. rig.Name .. " char1 is a " .. char1.ClassName)
+	else
+		print("[ROOM B ROOT] " .. rig.Name .. " does NOT contain char1")
+	end
+
+	-- Print top-level BaseParts to help user diagnose
+	local topParts = {}
+	for _, child in ipairs(rig:GetChildren()) do
+		if child:IsA("BasePart") then
+			table.insert(topParts, child.Name)
+		end
+	end
+	print("[ROOM B ROOT] " .. rig.Name .. " Top-level BaseParts: " .. table.concat(topParts, ", "))
+
+	local rootPart = rig.PrimaryPart
+
+	if not rootPart then
+		for _, name in ipairs({"HumanoidRootPart", "Root", "Torso", "LowerTorso", "UpperTorso", "char1"}) do
+			local p = rig:FindFirstChild(name, true)
+			if p and p:IsA("BasePart") then
+				rootPart = p
+				print("[ROOM B ROOT] " .. rig.Name .. " root chosen by search = " .. p.Name)
+				break
+			end
+		end
+	end
+
+	if not rootPart then
+		rootPart = rig:FindFirstChildWhichIsA("BasePart", true)
+		if rootPart then
+			print("[ROOM B ROOT] " .. rig.Name .. " fallback root = " .. rootPart.Name)
+		end
+	end
+
+	if not rootPart then
+		warn("[ROOM B ROOT ERROR] " .. rig.Name .. " has no usable root part")
+		return nil
+	end
+
+	rig.PrimaryPart = rootPart
+
+	-- Make sure it's upright and stable. If it's a custom rig meant to walk via CFrame, 
+	-- its root MUST be anchored. If it walks via physics, it needs a BodyGyro. 
+	-- We will anchor the root part to guarantee stability at spawn without toppling, 
+	-- but unanchor the limbs so animations can still move them relative to the root.
+
+	for _, part in ipairs(rig:GetDescendants()) do
+		if part:IsA("BasePart") then
+			if part == rootPart then
+				part.Anchored = true
+				part.CanCollide = true
+			else
+				part.Anchored = false
+				part.CanCollide = false
+				part.Massless = true
+			end
+		end
+	end
+
+	return rootPart
+end
+
+local function getFloorHeight(position)
+	local rayOrigin = position + Vector3.new(0, 5, 0)
+	local rayDirection = Vector3.new(0, -50, 0)
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if container then
+		raycastParams.FilterDescendantsInstances = {container}
+	end
+
+	local result = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+	if result then
+		return result.Position.Y
+	else
+		return position.Y
+	end
+end
+
+local function getAngleBetween(cf1, cf2)
+	local rot = cf1.Rotation:Inverse() * cf2.Rotation
+	local axis, angle = rot:ToAxisAngle()
+	return math.abs(math.deg(angle))
+end
+
+local function getAngleBetween(cf1, cf2)
+	local rot = cf1.Rotation:Inverse() * cf2.Rotation
+	local axis, angle = rot:ToAxisAngle()
+	return math.abs(math.deg(angle))
+end
+
+local function diagnoseSkinnedRig(golem, golemType, floorY)
+	local root = golem:FindFirstChild('char1')
+	if not root then return end
+
+	local animController = golem:FindFirstChildWhichIsA('AnimationController', true)
+	local animator = animController and animController:FindFirstChildWhichIsA('Animator')
+
+	local animId = ''
+	if golemType == 'GreenGolem' then
+		animId = 'rbxassetid://132075673875346'
+	elseif golemType == 'SkeliGolem' then
+		animId = 'rbxassetid://136845859551530'
+	end
+
+	if not animator or animId == '' then return end
+
+	local anim = Instance.new('Animation')
+	anim.AnimationId = animId
+	local track = animator:LoadAnimation(anim)
+
+	-- Wait for track length to load
+	local timeout = 5
+	while track.Length <= 0 and timeout > 0 do
+		task.wait(0.1)
+		timeout = timeout - 0.1
+	end
+
+	if track.Length <= 0 then
+		print('AnimationTrack.Length is <= 0! Stopping diagnostic.')
+		return
+	end
+
+	print('==================================================')
+	print('=== STARTING DIAGNOSTIC 3: ' .. golemType .. ' ===')
+	print('==================================================')
+
+	local trackedNames = {
+		'Hips', 'LeftFoot', 'RightFoot', 'LeftToeBase', 'RightToeBase'
+	}
+	local bones = {}
+	for _, bName in ipairs(trackedNames) do
+		local b = root:FindFirstChild(bName, true)
+		if b then bones[bName] = b end
+	end
+
+	local initialStates = {}
+	for name, bone in pairs(bones) do
+		initialStates[name] = {
+			WorldCFrame = bone.WorldCFrame,
+			Transform = bone.Transform
+		}
+	end
+
+	track:Play()
+	track:AdjustSpeed(1.0)
+
+	local dt = 0.05
+	local maxDuration = track.Length + 0.05
+	local elapsed = 0
+
+	local worstPose = {
+		time = 0,
+		minY = math.huge,
+		hY = 0, lfY = 0, rfY = 0, ltY = 0, rtY = 0
+	}
+
+	local hipsStats = { min = math.huge, max = -math.huge }
+	local relStats = {
+		LF = {min=math.huge, max=-math.huge},
+		RF = {min=math.huge, max=-math.huge},
+		LT = {min=math.huge, max=-math.huge},
+		RT = {min=math.huge, max=-math.huge},
+	}
+
+	while elapsed <= maxDuration do
+		local tp = track.TimePosition
+
+		print('\n=== ANIMATION SAMPLE ===')
+		print('AnimationTime: ' .. string.format('%.2f', tp))
+
+		local hY = bones['Hips'] and bones['Hips'].WorldPosition.Y or 0
+		if hY < hipsStats.min then hipsStats.min = hY end
+		if hY > hipsStats.max then hipsStats.max = hY end
+
+		local lfY = bones['LeftFoot'] and bones['LeftFoot'].WorldPosition.Y or 0
+		local rfY = bones['RightFoot'] and bones['RightFoot'].WorldPosition.Y or 0
+		local ltY = bones['LeftToeBase'] and bones['LeftToeBase'].WorldPosition.Y or 0
+		local rtY = bones['RightToeBase'] and bones['RightToeBase'].WorldPosition.Y or 0
+
+		local lfRel = lfY - hY
+		local rfRel = rfY - hY
+		local ltRelHips = ltY - hY
+		local rtRelHips = rtY - hY
+		local ltRelFoot = ltY - lfY
+		local rtRelFoot = rtY - rfY
+
+		if lfRel < relStats.LF.min then relStats.LF.min = lfRel end
+		if lfRel > relStats.LF.max then relStats.LF.max = lfRel end
+		if rfRel < relStats.RF.min then relStats.RF.min = rfRel end
+		if rfRel > relStats.RF.max then relStats.RF.max = rfRel end
+		if ltRelHips < relStats.LT.min then relStats.LT.min = ltRelHips end
+		if ltRelHips > relStats.LT.max then relStats.LT.max = ltRelHips end
+		if rtRelHips < relStats.RT.min then relStats.RT.min = rtRelHips end
+		if rtRelHips > relStats.RT.max then relStats.RT.max = rtRelHips end
+
+		local lowest = math.min(lfY, rfY, ltY, rtY)
+		if lowest < worstPose.minY then
+			worstPose.minY = lowest
+			worstPose.time = tp
+			worstPose.hY = hY
+			worstPose.lfY = lfY
+			worstPose.rfY = rfY
+			worstPose.ltY = ltY
+			worstPose.rtY = rtY
+		end
+
+		local function getTrans(name)
+			local b = bones[name]
+			if not b then return 'N/A' end
+			return string.format('%.3f', b.Transform.Position.Y)
+		end
+
+		print('Hips:')
+		print('  WorldY: ' .. string.format('%.3f', hY))
+		print('  TransformY: ' .. getTrans('Hips'))
+		print('LeftFoot:')
+		print('  WorldY: ' .. string.format('%.3f', lfY))
+		print('  RelativeToHipsY: ' .. string.format('%.3f', lfRel))
+		print('  TransformY: ' .. getTrans('LeftFoot'))
+		print('LeftToeBase:')
+		print('  WorldY: ' .. string.format('%.3f', ltY))
+		print('  RelativeToHipsY: ' .. string.format('%.3f', ltRelHips))
+		print('  RelativeToLeftFootY: ' .. string.format('%.3f', ltRelFoot))
+		print('  TransformY: ' .. getTrans('LeftToeBase'))
+		print('RightFoot:')
+		print('  WorldY: ' .. string.format('%.3f', rfY))
+		print('  RelativeToHipsY: ' .. string.format('%.3f', rfRel))
+		print('  TransformY: ' .. getTrans('RightFoot'))
+		print('RightToeBase:')
+		print('  WorldY: ' .. string.format('%.3f', rtY))
+		print('  RelativeToHipsY: ' .. string.format('%.3f', rtRelHips))
+		print('  RelativeToRightFootY: ' .. string.format('%.3f', rtRelFoot))
+		print('  TransformY: ' .. getTrans('RightToeBase'))
+
+		if tp >= track.Length - 0.01 and not track.Looped then break end
+		task.wait(dt)
+		elapsed = elapsed + dt
+	end
+
+	track:Stop()
+	anim:Destroy()
+
+	root.CFrame = root.CFrame
+	task.wait(0.1)
+
+	local hipsDelta = hipsStats.max - hipsStats.min
+	local isRootTrans = (hipsDelta > 0.05)
+
+	local isSkel = ((relStats.LT.max - relStats.LT.min) > 0.1 or (relStats.RT.max - relStats.RT.min) > 0.1)
+
+	local cause = 'INCONCLUSIVE'
+	local conf = 'LOW'
+	local reason = 'Awaiting full analysis of log chunks.'
+
+	if isRootTrans then
+		cause = 'A'
+		conf = 'HIGH'
+		reason = 'Hips WorldY delta (' .. string.format('%.3f', hipsDelta) .. ') exceeds tolerance, indicating root translation.'
+	elseif isSkel then
+		cause = 'B'
+		conf = 'HIGH'
+		reason = 'Hips are stable but toe/foot relative WorldY ranges exceed tolerance, indicating skeletal posing.'
+	end
+
+	print('\n=== FINAL DIAGNOSTIC ===')
+	print('Root Translation:')
+	print('  Hips WorldY Min: ' .. string.format('%.3f', hipsStats.min))
+	print('  Hips WorldY Max: ' .. string.format('%.3f', hipsStats.max))
+	print('  Hips WorldY Delta: ' .. string.format('%.3f', hipsDelta))
+	print('  Classification: ' .. (isRootTrans and 'A' or 'NOT A'))
+
+	print('\nSkeletal Motion:')
+	print('  LeftFoot relative motion: ' .. string.format('%.3f', relStats.LF.max - relStats.LF.min))
+	print('  RightFoot relative motion: ' .. string.format('%.3f', relStats.RF.max - relStats.RF.min))
+	print('  LeftToe relative motion: ' .. string.format('%.3f', relStats.LT.max - relStats.LT.min))
+	print('  RightToe relative motion: ' .. string.format('%.3f', relStats.RT.max - relStats.RT.min))
+	print('  Classification: ' .. (isSkel and 'B' or 'NOT B'))
+
+	print('\nMesh/Deformation Evidence:')
+	print('  Actual deformed vertex positions available: NO')
+	print('  MeshPart BottomY reliable for deformed geometry: NO')
+	print('  Classification: NOT DETERMINABLE')
+
+	print('\nWorst Pose:')
+	print('  AnimationTime: ' .. string.format('%.3f', worstPose.time))
+	print('  LeftFoot WorldY: ' .. string.format('%.3f', worstPose.lfY))
+	print('  RightFoot WorldY: ' .. string.format('%.3f', worstPose.rfY))
+	print('  LeftToe WorldY: ' .. string.format('%.3f', worstPose.ltY))
+	print('  RightToe WorldY: ' .. string.format('%.3f', worstPose.rtY))
+	print('  Hips WorldY: ' .. string.format('%.3f', worstPose.hY))
+
+	print('\nMost Likely Cause:')
+	print('  ' .. cause)
+
+	print('\nConfidence:')
+	print('  ' .. conf)
+
+	print('\nReason:')
+	print('  ' .. reason)
+end
+
+-- Internal spawner
+local function spawnSingleGolem(golemName, spawnPointName, clonedMsg, parentedMsg, posMsg)
+	local template = getGolemTemplate(golemName)
+	if not template then
+		warn("[ROOM B ERROR] " .. golemName .. " template NOT FOUND")
+		return nil
+	end
+
+	local spawnPoint = getSpawnPoint(spawnPointName)
+	if not spawnPoint then
+		warn("[ROOM B ERROR] Spawn point not found: " .. spawnPointName)
+		return nil
+	end
+
+	local newGolem = template:Clone()
+	if not newGolem then
+		warn("[ROOM B ERROR] Failed to clone " .. golemName)
+		return nil
+	end
+	print(clonedMsg)
+
+	local rootPart = discoverAndStabilizeRoot(newGolem)
+	if not rootPart then
+		warn("[ROOM B ERROR] " .. golemName .. " could not be stabilized!")
+	end
+
+	-- [1] RIG DIAGNOSTICS
+	local bones = 0
+	local motors = 0
+	local welds = 0
+	local attachments = 0
+	local animControllers = 0
+	local animators = 0
+
+	if rootPart then
+		for _, desc in ipairs(rootPart:GetDescendants()) do
+			if desc:IsA("Bone") then bones = bones + 1
+			elseif desc:IsA("Motor6D") then motors = motors + 1
+			elseif desc:IsA("Weld") or desc:IsA("WeldConstraint") then welds = welds + 1
+			elseif desc:IsA("Attachment") then attachments = attachments + 1
+			end
+		end
+	end
+
+	for _, desc in ipairs(newGolem:GetDescendants()) do
+		if desc:IsA("AnimationController") then animControllers = animControllers + 1
+		elseif desc:IsA("Animator") then animators = animators + 1
+		end
+	end
+
+	print("[ROOM B RIG DEBUG] " .. golemName .. " char1")
+	print("Bones = " .. bones)
+	print("Motor6Ds = " .. motors)
+	print("Welds = " .. welds)
+	print("Attachments = " .. attachments)
+	print("AnimationController = " .. animControllers)
+	print("Animator = " .. animators)
+
+	-- [2] GROUND DIAGNOSTICS
+	local rootPos = rootPart and rootPart.Position or newGolem:GetPivot().Position
+
+	-- 1. Get the golem model's bounding box using Model:GetBoundingBox().
+	local bbCFrame, bbSize = newGolem:GetBoundingBox()
+
+	-- 2. Determine the world-space Y coordinate of the model's lowest point.
+	local modelBottomY = bbCFrame.Position.Y - (bbSize.Y / 2)
+
+	-- 3. Raycast straight downward from the golem's root to the Room B floor to determine the actual floor Y.
+	local floorY = getFloorHeight(rootPos)
+
+	-- 4. Calculate: groundOffset = floorY - modelBottomY
+	local groundOffset = floorY - modelBottomY
+
+	-- The Server Output should show the calculated floorY, modelBottomY, and final groundOffset once per golem
+	print("[ROOM B GROUND] " .. golemName .. " floorY = " .. tostring(floorY))
+	print("[ROOM B GROUND] " .. golemName .. " modelBottomY = " .. tostring(modelBottomY))
+	print("[ROOM B GROUND] " .. golemName .. " final groundOffset = " .. tostring(groundOffset))
+
+	-- 5. Apply this offset once to the model's root CFrame.
+	local currentCFrame = newGolem:GetPivot()
+	newGolem:PivotTo(currentCFrame + Vector3.new(0, groundOffset, 0))
+
+	-- 6. After that calibration, never modify the golem's Y position during normal movement.
+	local fixedGroundY = rootPos.Y + groundOffset
+	newGolem:SetAttribute("FixedGroundY", fixedGroundY)
+	newGolem:SetAttribute("IsActive", false)
+
+	CollectionService:AddTag(newGolem, "Golem")
+
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if not container then
+		warn("[ROOM B ERROR] Active golem container missing during parent assignment!")
+		return nil
+	end
+
+	newGolem.Parent = container
+	print(parentedMsg)
+
+	local finalPos = newGolem:GetPivot().Position
+	print(posMsg .. " (at " .. tostring(finalPos) .. ")")
+
+	-- 	diagnoseSkinnedRig(newGolem, golemName, floorY)
+	return newGolem
+end
+
+-- Handle Defeat Logic
+local function onPhase1GolemDefeated(golemName)
+	if phase1Defeated[golemName] then return end
+	phase1Defeated[golemName] = true
+	print("[ROOM B COMBAT] " .. golemName .. " defeated")
+
+	if phase1Defeated.GreenGolem and phase1Defeated.SkeliGolem then
+		print("[ROOM B COMBAT] Phase 1 complete")
+		task.delay(3, function()
+			TrialChamberGolemController.ActivatePhase2()
+		end)
+	end
+end
+
+local function onPhase2GolemDefeated()
+	print("[ROOM B COMBAT] StoneGolem defeated")
+	task.delay(3, function()
+		TrialChamberGolemController.CompleteEncounter()
+	end)
+end
+
+-- Custom AI Loop for AnimationController Rigs
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+local function getNearestPlayer(position, maxDistance)
+	local nearestPlayer = nil
+	local shortestDistance = maxDistance
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character and player.Character.PrimaryPart then
+			local hum = player.Character:FindFirstChildOfClass("Humanoid")
+			if hum and hum.Health > 0 then
+				local dist = (player.Character.PrimaryPart.Position - position).Magnitude
+				if dist < shortestDistance then
+					shortestDistance = dist
+					nearestPlayer = player
+				end
+			end
+		end
+	end
+	return nearestPlayer
+end
+
+local function playAnimation(golem, animId)
+	local animController = golem:FindFirstChildOfClass("AnimationController") or golem:FindFirstChildOfClass("Humanoid")
+	if not animController then return nil end
+
+	local animator = animController:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = animController
+	end
+
+	local anim = Instance.new("Animation")
+	anim.AnimationId = "rbxassetid://" .. animId
+	local track = animator:LoadAnimation(anim)
+	track:Play()
+	return track
+end
+
+local function hookDeathDetection(golem, onDefeatedCallback)
+	local isDead = false
+	local function triggerDeath()
+		if isDead then return end
+		isDead = true
+		golem:SetAttribute("IsActive", false)
+		onDefeatedCallback()
+	end
+
+	local humanoid = golem:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.Died:Connect(triggerDeath)
+	end
+
+	local healthVal = golem:FindFirstChild("Health") or golem:FindFirstChild("health")
+	if healthVal and (healthVal:IsA("IntValue") or healthVal:IsA("NumberValue")) then
+		healthVal.Changed:Connect(function()
+			if healthVal.Value <= 0 then triggerDeath() end
+		end)
+	end
+
+	golem.AncestryChanged:Connect(function(_, newParent)
+		if not newParent then triggerDeath() end
+	end)
+end
+
+local function activateGolem(golem, golemType)
+	if not golem then return end
+
+	print("[ROOM B DIAGNOSTIC] " .. golemType .. " -> FROZEN IN PLACE (NO AI, NO ANIMATION)")
+
+	-- Keep them completely frozen. Do not start the chase loop.
+	-- Do not play animations.
+	-- Do not rotate toward the player.
+end
+
+-- Prepare Encounter (Spawns all 3 dormant)
+function TrialChamberGolemController.StartEncounter()
+	print("[ROOM B DEBUG 06] StartEncounter() entered")
+	if encounterActive then 
+		warn("[ROOM B ERROR] Encounter already active, aborting spawn")
+		return 
+	end
+
+	local templateFolder = ServerStorage:FindFirstChild("TrialChamberGolems")
+	if not templateFolder then
+		warn("[ROOM B ERROR] TrialChamberGolems folder NOT FOUND")
+		return
+	else
+		print("[ROOM B DEBUG 07] TrialChamberGolems folder located")
+	end
+
+	-- Auto-fix hierarchy if the golems were accidentally placed as siblings in ServerStorage
+	for _, name in ipairs({"GreenGolem", "SkeliGolem", "StoneGolem"}) do
+		if not templateFolder:FindFirstChild(name) then
+			local sibling = ServerStorage:FindFirstChild(name)
+			if sibling then
+				print("[ROOM B DEBUG] Auto-fixing hierarchy: Moving " .. name .. " into TrialChamberGolems folder.")
+				sibling.Parent = templateFolder
+			end
+		end
+	end
+
+	if templateFolder:FindFirstChild("GreenGolem") then print("[ROOM B DEBUG 08] GreenGolem template located") else warn("[ROOM B ERROR] GreenGolem template NOT FOUND") end
+	if templateFolder:FindFirstChild("SkeliGolem") then print("[ROOM B DEBUG 09] SkeliGolem template located") else warn("[ROOM B ERROR] SkeliGolem template NOT FOUND") end
+	if templateFolder:FindFirstChild("StoneGolem") then print("[ROOM B DEBUG 10] StoneGolem template located") else warn("[ROOM B ERROR] StoneGolem template NOT FOUND") end
+
+	local activeFolder = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if not activeFolder then
+		activeFolder = Instance.new("Folder")
+		activeFolder.Name = "TrialChamberActiveGolems"
+		activeFolder.Parent = Workspace
+	end
+	print("[ROOM B DEBUG 11] Active golem container created/found")
+
+	encounterActive = true
+	encounterPhase = 0
+	TrialChamberGolemController.CleanupAllGolems()
+
+	spawnedGolems.GreenGolem = spawnSingleGolem("GreenGolem", "GreenSpawn", "[ROOM B DEBUG 12] GreenGolem cloned", "[ROOM B DEBUG 13] GreenGolem parented", "[ROOM B DEBUG 14] GreenGolem positioned")
+	spawnedGolems.SkeliGolem = spawnSingleGolem("SkeliGolem", "SkeliSpawn", "[ROOM B DEBUG 15] SkeliGolem cloned", "[ROOM B DEBUG 16] SkeliGolem parented", "[ROOM B DEBUG 17] SkeliGolem positioned")
+	spawnedGolems.StoneGolem = spawnSingleGolem("StoneGolem", "StoneSpawn", "[ROOM B DEBUG 18] StoneGolem cloned", "[ROOM B DEBUG 19] StoneGolem parented", "[ROOM B DEBUG 20] StoneGolem positioned")
+
+	if spawnedGolems.GreenGolem and spawnedGolems.SkeliGolem and spawnedGolems.StoneGolem then
+		print("[ROOM B DEBUG 21] ALL THREE GOLEMS SUCCESSFULLY SPAWNED")
+
+		-- Temporarily disable physical collision between the two Phase 1 golems to prevent them pushing each other
+		local greenRoot = spawnedGolems.GreenGolem.PrimaryPart
+		local skeliRoot = spawnedGolems.SkeliGolem.PrimaryPart
+		if greenRoot and skeliRoot then
+			local ncc = Instance.new("NoCollisionConstraint")
+			ncc.Part0 = greenRoot
+			ncc.Part1 = skeliRoot
+			ncc.Parent = greenRoot
+		end
+	else
+		warn("[ROOM B ERROR] One or more golems failed to spawn fully")
+	end
+
+	if spawnedGolems.GreenGolem then hookDeathDetection(spawnedGolems.GreenGolem, function() onPhase1GolemDefeated("GreenGolem") end) end
+	if spawnedGolems.SkeliGolem then hookDeathDetection(spawnedGolems.SkeliGolem, function() onPhase1GolemDefeated("SkeliGolem") end) end
+	if spawnedGolems.StoneGolem then hookDeathDetection(spawnedGolems.StoneGolem, function() onPhase2GolemDefeated() end) end
+end
+
+-- Activate Encounter (Phase 1)
+function TrialChamberGolemController.ActivateEncounter()
+	if encounterPhase >= 1 then return end
+	encounterPhase = 1
+
+	print("[ROOM B COMBAT] Phase 1 started")
+	activateGolem(spawnedGolems.GreenGolem, "GreenGolem")
+	activateGolem(spawnedGolems.SkeliGolem, "SkeliGolem")
+	print("[ROOM B COMBAT] StoneGolem remains dormant")
+end
+
+-- Activate Phase 2
+function TrialChamberGolemController.ActivatePhase2()
+	if encounterPhase >= 2 then return end
+	encounterPhase = 2
+
+	print("[ROOM B COMBAT] StoneGolem activated")
+	activateGolem(spawnedGolems.StoneGolem, "StoneGolem")
+end
+
+function TrialChamberGolemController.CompleteEncounter()
+	print("[ROOM B COMBAT] Encounter Complete! All golems defeated.")
+	encounterActive = false
+	encounterPhase = 0
+end
+
+-- Expose globally for easy testing via Command Bar or other scripts
+_G.TrialChamberGolemController = TrialChamberGolemController
+
+
+-- =====================================================================
+-- LIFECYCLE OBSERVER DIAGNOSTIC
+-- =====================================================================
+local CollectionService = game:GetService('CollectionService')
+local golemLogs = {}
+local currentGolemIndex = 0
+local observerStarted = false
+
+local function printFinalSummary()
+	print('\n=== SEQUENTIAL GOLEM TIMELINE ===')
+	for i = 1, 3 do
+		local log = golemLogs[i]
+		if log then
+			print(log.name)
+			print('  Spawned:       ' .. log.spawnTimeStr)
+			print('  MovementStart: ' .. (log.moveStartTimeStr or 'N/A'))
+			print('  WalkStart:     ' .. (log.animStartTimeStr or 'N/A'))
+			print('  MovementEnd:   ' .. (log.moveEndTimeStr or 'N/A'))
+			print('  WalkStop:      ' .. (log.animEndTimeStr or 'N/A'))
+		end
+	end
+
+	print('\n=== SEQUENCE CONTROL ===')
+	print('Green -> Skeli:')
+	print('Trigger = UNKNOWN (No sequence code exists in TrialChamberGolemController or RevampV9. Likely an internal model script.)')
+	print('\nSkeli -> Stone:')
+	print('Trigger = UNKNOWN (No sequence code exists in TrialChamberGolemController or RevampV9. Likely an internal model script.)')
+end
+
+local function observeGolem(golem)
+	currentGolemIndex = currentGolemIndex + 1
+	local golemId = currentGolemIndex
+
+	local log = {
+		id = golemId,
+		name = golem.Name,
+		spawnTimeStr = string.format('%.3f', tick()),
+		moveStartTimeStr = nil,
+		animStartTimeStr = nil,
+		moveEndTimeStr = nil,
+		animEndTimeStr = nil,
+		lastPos = nil,
+		isMoving = false
+	}
+	table.insert(golemLogs, log)
+
+	local root = golem:WaitForChild('char1', 5) or golem.PrimaryPart
+	if not root then return end
+	log.lastPos = root.Position
+
+	local animController = golem:WaitForChild('AnimationController', 5) or golem:WaitForChild('Humanoid', 5)
+	local animator = animController and animController:WaitForChild('Animator', 5)
+
+	local function checkMovement()
+		local currentPos = root.Position
+		local dist = (currentPos - log.lastPos).Magnitude
+		if dist > 0.05 then
+			if not log.isMoving then
+				log.isMoving = true
+				log.moveStartTimeStr = string.format('%.3f', tick())
+				print('\n=== GOLEM MOVEMENT INITIATED ===')
+				print('Golem: ' .. golem.Name)
+				print('Timestamp: ' .. log.moveStartTimeStr)
+				print('Current Position: ' .. tostring(log.lastPos))
+				print('Movement mechanism: EXTERNAL (Not driven by TrialChamberGolemController. Likely internal Script/Tween/Pathfinding)')
+			end
+		else
+			if log.isMoving then
+				log.isMoving = false
+				log.moveEndTimeStr = string.format('%.3f', tick())
+				print('\n=== GOLEM MOVEMENT COMPLETED ===')
+				print('Golem: ' .. golem.Name)
+				print('Timestamp: ' .. log.moveEndTimeStr)
+				print('Final Position: ' .. tostring(currentPos))
+				print('Mechanism: EXTERNAL')
+			end
+		end
+		log.lastPos = currentPos
+	end
+
+	-- Monitor movement
+	root:GetPropertyChangedSignal('Position'):Connect(checkMovement)
+	root:GetPropertyChangedSignal('CFrame'):Connect(checkMovement)
+
+	if animator then
+		animator.AnimationPlayed:Connect(function(track)
+			log.animStartTimeStr = string.format('%.3f', tick())
+			print('\n=== ANIMATION PLAYED ===')
+			print('Timestamp: ' .. log.animStartTimeStr)
+			print('Golem: ' .. golem.Name)
+			print('Track: ' .. tostring(track.Animation and track.Animation.AnimationId or 'Unknown'))
+			print('Length: ' .. tostring(track.Length))
+			print('Speed: ' .. tostring(track.Speed))
+			print('TimePosition: ' .. tostring(track.TimePosition))
+
+			track.Stopped:Connect(function()
+				log.animEndTimeStr = string.format('%.3f', tick())
+				print('\n=== ANIMATION STOPPED ===')
+				print('Timestamp: ' .. log.animEndTimeStr)
+				print('Golem: ' .. golem.Name)
+				print('Track: ' .. tostring(track.Animation and track.Animation.AnimationId or 'Unknown'))
+				print('Length: ' .. tostring(track.Length))
+				print('Speed: ' .. tostring(track.Speed))
+				print('TimePosition: ' .. tostring(track.TimePosition))
+
+				if golemId >= 3 then
+					task.spawn(function()
+						task.wait(1)
+						printFinalSummary()
+					end)
+				end
+			end)
+		end)
+	end
+end
+
+if not observerStarted then
+	observerStarted = true
+	CollectionService:GetInstanceAddedSignal('Golem'):Connect(observeGolem)
+	for _, g in ipairs(CollectionService:GetTagged('Golem')) do
+		task.spawn(observeGolem, g)
+	end
+end
+-- =====================================================================
+
+return TrialChamberGolemController
