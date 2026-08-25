@@ -1,0 +1,232 @@
+-- Progression_TrialChamber.lua
+-- Room B player progression + GolemBaneSword combat (server-authoritative).
+-- Responsibilities: sword creation, grant, swing, hit detection, damage.
+-- Golem AI/health bars/activation remain in TrialChamberGolemController.
+
+local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
+
+local SWING_COOLDOWN = 0.5
+local SWING_WINDOW = 0.25
+local DAMAGE_FRACTION = 0.15 -- 15% of target MaxHealth per valid hit
+
+------------------------------------------------------------------------
+-- Sword construction
+------------------------------------------------------------------------
+
+local function weldOffset(handle, part, relativeCFrame)
+	part.CFrame = handle.CFrame * relativeCFrame
+	local weld = Instance.new("Weld")
+	weld.Name = part.Name .. "Weld"
+	weld.Part0 = handle
+	weld.Part1 = part
+	weld.C0 = relativeCFrame
+	weld.C1 = CFrame.new()
+	weld.Parent = handle
+end
+
+local function buildSwordTool()
+	local tool = Instance.new("Tool")
+	tool.Name = "GolemBaneSword"
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+	-- Grip: hold the handle so the blade extends forward/up from the hand
+	tool.Grip = CFrame.new(0, -0.2, 0) * CFrame.Angles(math.rad(-90), 0, 0)
+
+	-- Handle (block = reliable vertical grip; cylinders are X-axis by default)
+	local handle = Instance.new("Part")
+	handle.Name = "Handle"
+	handle.Material = Enum.Material.Wood
+	handle.Color = Color3.fromRGB(72, 48, 28)
+	handle.Size = Vector3.new(0.28, 1.15, 0.28)
+	handle.CanCollide = false
+	handle.CanTouch = false
+	handle.Massless = true
+	handle.Parent = tool
+
+	-- Crossguard
+	local guard = Instance.new("Part")
+	guard.Name = "Guard"
+	guard.Material = Enum.Material.Metal
+	guard.Color = Color3.fromRGB(160, 130, 55)
+	guard.Size = Vector3.new(0.35, 0.18, 1.15)
+	guard.CanCollide = false
+	guard.CanTouch = false
+	guard.Massless = true
+	guard.Parent = tool
+	weldOffset(handle, guard, CFrame.new(0, 0.55, 0))
+
+	-- Thin blade body
+	local blade = Instance.new("Part")
+	blade.Name = "Blade"
+	blade.Material = Enum.Material.Metal
+	blade.Color = Color3.fromRGB(210, 215, 225)
+	blade.Size = Vector3.new(0.12, 3.2, 0.42)
+	blade.CanCollide = false
+	blade.CanTouch = false
+	blade.Massless = true
+	blade.Parent = tool
+	weldOffset(handle, blade, CFrame.new(0, 2.25, 0))
+
+	-- Pointed tip
+	local tip = Instance.new("WedgePart")
+	tip.Name = "Tip"
+	tip.Material = Enum.Material.Metal
+	tip.Color = Color3.fromRGB(210, 215, 225)
+	tip.Size = Vector3.new(0.12, 0.55, 0.42)
+	tip.CanCollide = false
+	tip.CanTouch = false
+	tip.Massless = true
+	tip.Parent = tool
+	-- Wedge thick end sits against blade tip; rotate so point faces outward
+	weldOffset(handle, tip, CFrame.new(0, 4.1, 0) * CFrame.Angles(math.rad(180), 0, 0))
+
+	-- Pommel
+	local pommel = Instance.new("Part")
+	pommel.Name = "Pommel"
+	pommel.Material = Enum.Material.Metal
+	pommel.Color = Color3.fromRGB(160, 130, 55)
+	pommel.Size = Vector3.new(0.38, 0.38, 0.38)
+	pommel.Shape = Enum.PartType.Ball
+	pommel.CanCollide = false
+	pommel.CanTouch = false
+	pommel.Massless = true
+	pommel.Parent = tool
+	weldOffset(handle, pommel, CFrame.new(0, -0.7, 0))
+
+	-- Subtle fuller / ridge for silhouette (cosmetic only)
+	local fuller = Instance.new("Part")
+	fuller.Name = "Fuller"
+	fuller.Material = Enum.Material.Metal
+	fuller.Color = Color3.fromRGB(170, 175, 185)
+	fuller.Size = Vector3.new(0.04, 2.6, 0.18)
+	fuller.CanCollide = false
+	fuller.CanTouch = false
+	fuller.Massless = true
+	fuller.Parent = tool
+	weldOffset(handle, fuller, CFrame.new(0, 2.15, 0))
+
+	return tool, blade
+end
+
+local function findGolemModelFromPart(part)
+	local current = part
+	while current and current ~= Workspace do
+		if current:IsA("Model") and CollectionService:HasTag(current, "Golem") then
+			return current
+		end
+		current = current.Parent
+	end
+	return nil
+end
+
+local function bindSwordCombat(tool, blade, player)
+	local canSwing = true
+	local swingDamagedGolems = {}
+
+	tool.Activated:Connect(function()
+		if not canSwing then
+			return
+		end
+		if not player.Character then
+			return
+		end
+
+		canSwing = false
+		table.clear(swingDamagedGolems)
+		print("[ROOM B COMBAT] Sword swing started")
+
+		local originalGrip = tool.Grip
+		tool.Grip = originalGrip * CFrame.Angles(math.rad(-70), 0, 0)
+
+		task.spawn(function()
+			local swingEnd = os.clock() + SWING_WINDOW
+			while os.clock() < swingEnd do
+				local character = player.Character
+				if not character or not tool:IsDescendantOf(character) then
+					break
+				end
+
+				local playerRoot = character:FindFirstChild("HumanoidRootPart")
+				if playerRoot then
+					local hitboxCFrame = playerRoot.CFrame * CFrame.new(0, 0.5, -3.5)
+					local hitboxSize = Vector3.new(5, 5, 6)
+
+					local overlapParams = OverlapParams.new()
+					overlapParams.FilterDescendantsInstances = { player.Character, tool }
+					overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+
+					local parts = Workspace:GetPartBoundsInBox(hitboxCFrame, hitboxSize, overlapParams)
+					for _, part in ipairs(parts) do
+						local model = findGolemModelFromPart(part)
+						if model and not swingDamagedGolems[model] then
+							local currentHealth = model:GetAttribute("Health")
+							local isActive = model:GetAttribute("IsActive") == true
+							if currentHealth and currentHealth > 0 and isActive then
+								swingDamagedGolems[model] = true
+
+								local maxHealth = model:GetAttribute("MaxHealth") or 200
+								local damage = maxHealth * DAMAGE_FRACTION
+								local newHealth = math.max(0, currentHealth - damage)
+								model:SetAttribute("Health", newHealth)
+
+								print("[ROOM B COMBAT] Sword hit " .. model.Name .. " for " .. tostring(damage))
+								print("[ROOM B COMBAT] " .. model.Name .. " HP: " .. tostring(newHealth) .. "/" .. tostring(maxHealth))
+							end
+						end
+					end
+				end
+
+				task.wait()
+			end
+
+			tool.Grip = originalGrip
+			task.wait(math.max(0, SWING_COOLDOWN - SWING_WINDOW))
+			canSwing = true
+		end)
+	end)
+end
+
+------------------------------------------------------------------------
+-- Public API
+------------------------------------------------------------------------
+
+local function rewardSword(player)
+	if player:GetAttribute("ReceivedRoomBSword") then
+		-- Still ensure an existing sword keeps combat bindings if somehow replaced.
+		local existing = (player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("GolemBaneSword"))
+			or (player.Character and player.Character:FindFirstChild("GolemBaneSword"))
+		if existing then
+			print("[ROOM B COMBAT] GolemBaneSword already granted — skipping duplicate")
+			return
+		end
+		-- Attribute set but sword missing (death/reset edge case): allow re-grant.
+		player:SetAttribute("ReceivedRoomBSword", false)
+	end
+
+	player:SetAttribute("ReceivedRoomBSword", true)
+
+	local tool, blade = buildSwordTool()
+	bindSwordCombat(tool, blade, player)
+
+	local backpack = player:FindFirstChild("Backpack") or player:WaitForChild("Backpack", 5)
+	if not backpack then
+		warn("[ROOM B COMBAT] Could not find Backpack for " .. player.Name)
+		tool:Destroy()
+		player:SetAttribute("ReceivedRoomBSword", false)
+		return
+	end
+
+	tool.Parent = backpack
+
+	print("[ROOM B COMBAT] Progression system resolved")
+	print("[ROOM B COMBAT] GolemBaneSword successfully created")
+	print("[ROOM B COMBAT] GolemBaneSword placed in Backpack")
+	print("[ROOM B COMBAT] GolemBaneSword granted to " .. player.Name)
+end
+
+_G.Progression = {
+	rewardSword = rewardSword,
+}
+
+return _G.Progression
