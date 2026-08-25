@@ -1,0 +1,921 @@
+-- TrialChamberGolemController.lua
+-- Authoritative Room B Combat Controller
+-- Compatible with RevampV10 (TrialChamberGeneratedV5_Sky) custom Golem rigs (no Humanoid).
+
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local PhysicsService = game:GetService("PhysicsService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local GOLEM_STATS = {
+	SkeliGolem = { MaxHealth = 200 },
+	GreenGolem = { MaxHealth = 200 },
+	StoneGolem = { MaxHealth = 300 }, -- configured but disabled for this encounter
+}
+
+local FALLBACK_ANIMS = {
+	Walk = "rbxassetid://136845859551530",
+	Attack = "rbxassetid://132075673875346",
+}
+
+local PLAYER_ATTACK_DAMAGE = 15
+local WALK_SPEED = 12
+local ATTACK_RANGE = 5.5
+local ATTACK_COOLDOWN = 1.2
+local ATTACK_DURATION = 1.0
+local ATTACK_DAMAGE_TIME = 0.5
+local MOVE_INTERVAL = 0.06
+
+local activeConnections = {}
+local encounterStarted = false
+local gateBCOpened = false
+
+pcall(function()
+	PhysicsService:RegisterCollisionGroup("RoomBGolems")
+	PhysicsService:RegisterCollisionGroup("RoomBPlayers")
+	PhysicsService:CollisionGroupSetCollidable("RoomBGolems", "RoomBPlayers", false)
+	PhysicsService:CollisionGroupSetCollidable("RoomBGolems", "RoomBGolems", false)
+end)
+
+------------------------------------------------------------------------
+-- Helpers
+------------------------------------------------------------------------
+
+local function findTrialRoot()
+	return Workspace:FindFirstChild("TrialChamberGeneratedV5_Sky")
+		or Workspace:FindFirstChild("TrialChamberActive")
+		or Workspace:FindFirstChild("TrialChamberV2")
+end
+
+local function findRoomB()
+	local root = findTrialRoot()
+	return root and root:FindFirstChild("RoomB") or nil
+end
+
+local function findGateBC()
+	local roomB = findRoomB()
+	if not roomB then
+		return nil
+	end
+	local decorations = roomB:FindFirstChild("Decorations")
+	if decorations then
+		local gate = decorations:FindFirstChild("Gate_BC")
+		if gate then
+			return gate
+		end
+	end
+	return roomB:FindFirstChild("Gate_BC", true)
+end
+
+local function findSpawnFolder()
+	local roomB = findRoomB()
+	if roomB then
+		local spawnFolder = roomB:FindFirstChild("GolemSpawnPoints")
+		if spawnFolder then
+			return spawnFolder
+		end
+	end
+	return Workspace:FindFirstChild("GolemSpawnPoints", true)
+end
+
+local function findSpawnPart(spawnFolder, preferredNames)
+	if not spawnFolder then
+		return nil
+	end
+	for _, name in ipairs(preferredNames) do
+		local part = spawnFolder:FindFirstChild(name)
+		if part then
+			return part, name
+		end
+	end
+	return nil, nil
+end
+
+local function deepFindModel(container, modelName)
+	if not container then
+		return nil
+	end
+	local direct = container:FindFirstChild(modelName)
+	if direct and direct:IsA("Model") then
+		return direct
+	end
+	for _, desc in ipairs(container:GetDescendants()) do
+		if desc.Name == modelName and desc:IsA("Model") then
+			return desc
+		end
+	end
+	return nil
+end
+
+local function isUsableTemplate(template)
+	if not template or not template:IsA("Model") then
+		return false
+	end
+	if template:GetAttribute("IsActive") then
+		return false
+	end
+	if CollectionService:HasTag(template, "Golem") then
+		return false
+	end
+	-- Reject live spawned copies sitting in the active golem container
+	if template.Parent and template.Parent.Name == "TrialChamberActiveGolems" then
+		return false
+	end
+	return true
+end
+
+local function getGolemTemplate(golemName)
+	local ServerStorage = game:GetService("ServerStorage")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	local preferredFolders = {
+		ServerStorage:FindFirstChild("TrialChamberGolems"),
+		ServerStorage:FindFirstChild("Enemies"),
+		ServerStorage:FindFirstChild("Golems"),
+		ReplicatedStorage:FindFirstChild("TrialChamberGolems"),
+		ReplicatedStorage:FindFirstChild("Enemies"),
+	}
+
+	for _, folder in ipairs(preferredFolders) do
+		if folder then
+			local template = folder:FindFirstChild(golemName)
+			if isUsableTemplate(template) then
+				print("[ROOM B GOLEMS] " .. golemName .. " template resolved: " .. template:GetFullName())
+				return template
+			end
+		end
+	end
+
+	local deepSources = { ServerStorage, ReplicatedStorage }
+	for _, storage in ipairs(deepSources) do
+		local template = deepFindModel(storage, golemName)
+		if isUsableTemplate(template) then
+			print("[ROOM B GOLEMS] " .. golemName .. " template resolved: " .. template:GetFullName())
+			return template
+		end
+	end
+
+	-- Workspace fallback (careful — only untagged templates)
+	local workspaceHit = deepFindModel(Workspace, golemName)
+	if isUsableTemplate(workspaceHit) then
+		print("[ROOM B GOLEMS] " .. golemName .. " template resolved: " .. workspaceHit:GetFullName())
+		return workspaceHit
+	end
+
+	warn("[ROOM B ERROR] " .. golemName .. " template NOT FOUND in standard paths!")
+	return nil
+end
+
+local function ensureAnimator(golem)
+	local animController = golem:FindFirstChildOfClass("AnimationController")
+	if not animController then
+		animController = Instance.new("AnimationController")
+		animController.Name = "AnimationController"
+		animController.Parent = golem
+	end
+
+	local animator = animController:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Name = "Animator"
+		animator.Parent = animController
+	end
+
+	return animController, animator
+end
+
+local function getGolemAnimation(golem, nameSubstring)
+	for _, desc in ipairs(golem:GetDescendants()) do
+		if desc:IsA("Animation") and string.find(string.lower(desc.Name), string.lower(nameSubstring), 1, true) then
+			return desc.AnimationId
+		end
+	end
+
+	local lower = string.lower(nameSubstring)
+	if string.find(lower, "walk", 1, true) or string.find(lower, "run", 1, true) then
+		return FALLBACK_ANIMS.Walk
+	elseif string.find(lower, "attack", 1, true) then
+		return FALLBACK_ANIMS.Attack
+	end
+
+	return nil
+end
+
+local function resolveRoot(golem)
+	local root = golem.PrimaryPart
+		or golem:FindFirstChild("char1")
+		or golem:FindFirstChild("HumanoidRootPart")
+		or golem:FindFirstChild("RootPart")
+		or golem:FindFirstChild("Torso")
+
+	if not root then
+		for _, part in ipairs(golem:GetDescendants()) do
+			if part:IsA("BasePart") then
+				root = part
+				break
+			end
+		end
+	end
+
+	if root and golem.PrimaryPart ~= root then
+		golem.PrimaryPart = root
+	end
+
+	return root
+end
+
+local function getRootGroundOffset(golem, root)
+	local bboxCF, bboxSize = golem:GetBoundingBox()
+	local bottomY = bboxCF.Position.Y - (bboxSize.Y / 2)
+	return root.Position.Y - bottomY
+end
+
+local function groundGolemAt(golem, root, horizontalPos, lookFlatDir)
+	local rootToBottom = getRootGroundOffset(golem, root)
+
+	local rayOrigin = Vector3.new(horizontalPos.X, horizontalPos.Y + 20, horizontalPos.Z)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {
+		golem,
+		Workspace:FindFirstChild("TrialChamberActiveGolems"),
+		findSpawnFolder(),
+	}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	local result = Workspace:Raycast(rayOrigin, Vector3.new(0, -80, 0), rayParams)
+	local floorY = result and result.Position.Y or (horizontalPos.Y - 5)
+	local groundedPos = Vector3.new(horizontalPos.X, floorY + rootToBottom, horizontalPos.Z)
+
+	local lookTarget = groundedPos + (lookFlatDir.Magnitude > 0.001 and lookFlatDir.Unit or Vector3.new(0, 0, -1))
+	golem:PivotTo(CFrame.lookAt(groundedPos, Vector3.new(lookTarget.X, groundedPos.Y, lookTarget.Z)))
+end
+
+local function applyGolemCollisionSetup(golem, root, isActive)
+	for _, part in ipairs(golem:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CollisionGroup = "RoomBGolems"
+			part.Massless = (part ~= root)
+
+			if isActive then
+				-- Root stays anchored so PivotTo locomotion is authoritative.
+				-- Other parts stay unanchored so Motor6D animations can play.
+				if part == root then
+					part.Anchored = true
+					part.CanCollide = true
+				else
+					part.Anchored = false
+					part.CanCollide = false
+					part.CanTouch = false
+				end
+			else
+				-- Dormant: fully anchored, immovable, still solid for presence.
+				part.Anchored = true
+				part.CanCollide = (part == root)
+				part.AssemblyLinearVelocity = Vector3.zero
+				part.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	end
+end
+
+local function applyPlayerCollisionGroup(character)
+	if not character then
+		return
+	end
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CollisionGroup = "RoomBPlayers"
+		end
+	end
+end
+
+local function ensurePlayersInCollisionGroup()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then
+			applyPlayerCollisionGroup(player.Character)
+		end
+	end
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		task.defer(function()
+			applyPlayerCollisionGroup(character)
+		end)
+	end)
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	if player.Character then
+		applyPlayerCollisionGroup(player.Character)
+	end
+	player.CharacterAdded:Connect(function(character)
+		task.defer(function()
+			applyPlayerCollisionGroup(character)
+		end)
+	end)
+end
+
+local function trackConnection(golemType, conn)
+	if activeConnections[golemType] then
+		activeConnections[golemType]:Disconnect()
+		activeConnections[golemType] = nil
+	end
+	activeConnections[golemType] = conn
+end
+
+local function clearConnection(golemType)
+	if activeConnections[golemType] then
+		activeConnections[golemType]:Disconnect()
+		activeConnections[golemType] = nil
+	end
+end
+
+local function createHealthBar(golem, root, golemName, maxHealth)
+	local existing = root:FindFirstChild("HealthBar")
+	if existing then
+		existing:Destroy()
+	end
+
+	local _, bboxSize = golem:GetBoundingBox()
+	local offsetY = math.max(4, (bboxSize.Y * 0.55) + 1.5)
+
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "HealthBar"
+	bg.Size = UDim2.new(5, 0, 0.6, 0)
+	bg.StudsOffset = Vector3.new(0, offsetY, 0)
+	bg.AlwaysOnTop = true
+	bg.MaxDistance = 120
+	bg.Adornee = root
+	bg.Parent = root
+
+	local bgFrame = Instance.new("Frame")
+	bgFrame.Name = "Background"
+	bgFrame.Size = UDim2.new(1, 0, 1, 0)
+	bgFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+	bgFrame.BorderSizePixel = 0
+	bgFrame.Parent = bg
+
+	local fill = Instance.new("Frame")
+	fill.Name = "Fill"
+	fill.Size = UDim2.new(1, 0, 1, 0)
+	fill.BackgroundColor3 = (golemName == "GreenGolem") and Color3.fromRGB(50, 200, 70) or Color3.fromRGB(200, 50, 50)
+	fill.BorderSizePixel = 0
+	fill.Parent = bgFrame
+
+	local text = Instance.new("TextLabel")
+	text.Name = "HealthText"
+	text.Size = UDim2.new(1, 0, 1, 0)
+	text.BackgroundTransparency = 1
+	text.Text = tostring(maxHealth) .. " / " .. tostring(maxHealth)
+	text.TextColor3 = Color3.new(1, 1, 1)
+	text.TextScaled = true
+	text.Font = Enum.Font.GothamBold
+	text.Parent = bgFrame
+
+	golem:GetAttributeChangedSignal("Health"):Connect(function()
+		local current = golem:GetAttribute("Health") or 0
+		local max = golem:GetAttribute("MaxHealth") or maxHealth
+		fill.Size = UDim2.new(math.clamp(current / math.max(max, 1), 0, 1), 0, 1, 0)
+		text.Text = tostring(math.floor(current)) .. " / " .. tostring(max)
+	end)
+end
+
+------------------------------------------------------------------------
+-- Gate BC
+------------------------------------------------------------------------
+
+local function openGateBC()
+	if gateBCOpened or _G.GateBCOpened then
+		return
+	end
+	gateBCOpened = true
+	_G.GateBCOpened = true
+
+	print("[ROOM B GOLEMS] Both guardians defeated")
+	print("[ROOM B GOLEMS] Gate BC may open")
+
+	local gateBC = findGateBC()
+	if not gateBC then
+		warn("[ROOM B ERROR] Gate_BC not found for opening!")
+		return
+	end
+
+	local leafL = gateBC:FindFirstChild("DoorLeaf_L")
+	local leafR = gateBC:FindFirstChild("DoorLeaf_R")
+	if not leafL or not leafR then
+		warn("[ROOM B ERROR] Gate_BC door leaves not found!")
+		return
+	end
+
+	print("[ROOM B] Gate BC opened successfully")
+	print("[RoomB] ALL GOLEMS DEFEATED. OPENING GATE BC.")
+
+	local startL = leafL:GetPivot()
+	local startR = leafR:GetPivot()
+	local targetL = CFrame.new(startL.Position + Vector3.new(-14, 0, 0)) * startL.Rotation
+	local targetR = CFrame.new(startR.Position + Vector3.new(14, 0, 0)) * startR.Rotation
+	local tweenInfo = TweenInfo.new(2.5, Enum.EasingStyle.Cubic, Enum.EasingDirection.Out)
+
+	local cframeValL = Instance.new("CFrameValue")
+	cframeValL.Value = startL
+	cframeValL.Changed:Connect(function()
+		leafL:PivotTo(cframeValL.Value)
+	end)
+
+	local cframeValR = Instance.new("CFrameValue")
+	cframeValR.Value = startR
+	cframeValR.Changed:Connect(function()
+		leafR:PivotTo(cframeValR.Value)
+	end)
+
+	TweenService:Create(cframeValL, tweenInfo, { Value = targetL }):Play()
+	TweenService:Create(cframeValR, tweenInfo, { Value = targetR }):Play()
+end
+
+local function checkRoomBCompletion()
+	if _G.SkeliDefeated and _G.GreenDefeated then
+		openGateBC()
+	end
+end
+
+------------------------------------------------------------------------
+-- AI / Locomotion (custom rig — no Humanoid)
+------------------------------------------------------------------------
+
+local function spawnController(golem, golemType, walkAnimId, attackAnimId)
+	local root = resolveRoot(golem)
+	if not root then
+		warn("[ROOM B ERROR] " .. golemType .. " has no root part!")
+		return
+	end
+
+	local currentState = "Idle"
+	local targetPlayer = nil
+	local lastAttackTime = 0
+	local activeTrack = nil
+	local walkTrack = nil
+	local timeSinceLastUpdate = 0
+	local animator = select(2, ensureAnimator(golem))
+
+	local function stopActiveTrack()
+		if activeTrack then
+			pcall(function()
+				activeTrack:Stop(0.1)
+			end)
+			activeTrack = nil
+		end
+	end
+
+	local function playTrack(animId, looped, priority)
+		if not animator or not animId then
+			return nil
+		end
+
+		local track
+		local ok = pcall(function()
+			local anim = Instance.new("Animation")
+			anim.AnimationId = animId
+			track = animator:LoadAnimation(anim)
+			track.Priority = priority or Enum.AnimationPriority.Movement
+			track.Looped = looped and true or false
+			track:Play(0.1)
+		end)
+
+		if not ok then
+			return nil
+		end
+		return track
+	end
+
+	local function ensureWalkPlaying()
+		if walkTrack and walkTrack.IsPlaying then
+			return walkTrack
+		end
+		walkTrack = playTrack(walkAnimId, true, Enum.AnimationPriority.Movement)
+		activeTrack = walkTrack
+		print("[ROOM B ANIMATION] Walk IsPlaying = " .. tostring(walkTrack and walkTrack.IsPlaying))
+		return walkTrack
+	end
+
+	local function setState(newState)
+		if currentState == newState then
+			return
+		end
+		currentState = newState
+		print("[ROOM B AI] " .. golemType .. " -> " .. string.upper(newState))
+
+		if newState == "Idle" or newState == "Dead" then
+			stopActiveTrack()
+			walkTrack = nil
+		elseif newState == "Chasing" then
+			ensureWalkPlaying()
+		elseif newState == "Attacking" then
+			if walkTrack then
+				pcall(function()
+					walkTrack:Stop(0.05)
+				end)
+				walkTrack = nil
+			end
+			stopActiveTrack()
+		end
+	end
+
+	local function getNearestPlayer(position, maxDistance)
+		local nearest = nil
+		local shortest = maxDistance
+		for _, player in ipairs(Players:GetPlayers()) do
+			local character = player.Character
+			if character then
+				applyPlayerCollisionGroup(character)
+				local hum = character:FindFirstChildOfClass("Humanoid")
+				local rootPart = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+				if hum and hum.Health > 0 and rootPart then
+					local dist = (rootPart.Position - position).Magnitude
+					if dist < shortest then
+						shortest = dist
+						nearest = player
+					end
+				end
+			end
+		end
+		return nearest
+	end
+
+	local activeConn
+	activeConn = RunService.Heartbeat:Connect(function(dt)
+		if not golem.Parent then
+			activeConn:Disconnect()
+			return
+		end
+
+		if golem:GetAttribute("IsActive") ~= true then
+			return
+		end
+
+		local currentHealth = golem:GetAttribute("Health") or 0
+		if currentHealth <= 0 then
+			if currentState ~= "Dead" then
+				setState("Dead")
+				golem:SetAttribute("IsActive", false)
+				golem:SetAttribute("AIStarted", false)
+				print("[ROOM B AI] " .. golemType .. " -> DEAD")
+				print("[ROOM B COMBAT] " .. golemType .. " defeated")
+				print("[ROOM B GOLEMS] " .. golemType .. " defeated")
+
+				clearConnection(golemType)
+
+				if golemType == "SkeliGolem" then
+					_G.SkeliDefeated = true
+					print("[ROOM B GOLEMS] Activating existing GreenGolem")
+					local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+					local green = container and container:FindFirstChild("GreenGolem")
+					if green then
+						local Controller = _G.TrialChamberGolemController
+						if Controller and Controller.activateGolem then
+							task.delay(0.75, function()
+								if green.Parent then
+									Controller.activateGolem(green, "GreenGolem")
+								end
+							end)
+						end
+					else
+						warn("[ROOM B ERROR] GreenGolem missing after Skeli defeat!")
+					end
+				elseif golemType == "GreenGolem" then
+					_G.GreenDefeated = true
+				end
+
+				checkRoomBCompletion()
+				task.delay(2, function()
+					if golem and golem.Parent then
+						golem:Destroy()
+					end
+				end)
+			end
+			return
+		end
+
+		if currentState == "Dead" then
+			return
+		end
+
+		-- Target acquisition
+		local targetStillValid = false
+		if targetPlayer and targetPlayer.Character then
+			local hum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+			local tRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart") or targetPlayer.Character.PrimaryPart
+			targetStillValid = hum and hum.Health > 0 and tRoot ~= nil
+		end
+
+		if not targetStillValid then
+			local newTarget = getNearestPlayer(root.Position, 1000)
+			if newTarget ~= targetPlayer then
+				targetPlayer = newTarget
+				if targetPlayer then
+					print("[ROOM B GOLEMS] " .. golemType .. " target acquired: " .. targetPlayer.Name)
+					if currentState == "Idle" then
+						setState("Chasing")
+					end
+				else
+					setState("Idle")
+				end
+			end
+		end
+
+		local targetRoot = targetPlayer
+			and targetPlayer.Character
+			and (targetPlayer.Character:FindFirstChild("HumanoidRootPart") or targetPlayer.Character.PrimaryPart)
+
+		if not targetRoot then
+			return
+		end
+
+		local diff = targetRoot.Position - root.Position
+		local flatDiff = Vector3.new(diff.X, 0, diff.Z)
+		local dist = flatDiff.Magnitude
+		local flatDir = (dist > 0.001) and flatDiff.Unit or Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		if flatDir.Magnitude < 0.001 then
+			flatDir = Vector3.new(0, 0, -1)
+		else
+			flatDir = flatDir.Unit
+		end
+
+		if currentState == "Idle" or currentState == "Chasing" then
+			if dist <= ATTACK_RANGE then
+				if tick() - lastAttackTime >= ATTACK_COOLDOWN then
+					setState("Attacking")
+					print("[ROOM B COMBAT] " .. golemType .. " attack started")
+					print("[ROOM B ANIMATION] Walk IsPlaying = false")
+
+					local track = playTrack(attackAnimId, false, Enum.AnimationPriority.Action)
+					activeTrack = track
+					if track then
+						print("[ROOM B ANIMATION] Attack track loaded")
+						print("[ROOM B ANIMATION] Attack IsPlaying = " .. tostring(track.IsPlaying))
+					else
+						warn("[ROOM B ANIMATION] " .. golemType .. " ATTACK track failed to play")
+					end
+
+					task.spawn(function()
+						if track then
+							local waited = 0
+							while track.Length == 0 and waited < 0.5 do
+								waited += task.wait(0.05)
+							end
+							if track.Length > 0 then
+								print("[ROOM B ANIMATION] Attack track length: " .. string.format("%.2f", track.Length))
+								pcall(function()
+									track:AdjustSpeed(track.Length / ATTACK_DURATION)
+								end)
+							end
+						end
+
+						task.wait(ATTACK_DAMAGE_TIME)
+
+						if golem.Parent and golem:GetAttribute("IsActive") and targetPlayer and targetPlayer.Character then
+							local targetHum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+							local tRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+								or targetPlayer.Character.PrimaryPart
+							if targetHum and targetHum.Health > 0 and tRoot then
+								local currentDist = (root.Position - tRoot.Position).Magnitude
+								if currentDist <= ATTACK_RANGE + 2 then
+									targetHum:TakeDamage(PLAYER_ATTACK_DAMAGE)
+									print("[ROOM B COMBAT] " .. golemType .. " attack damage applied")
+									print("[ROOM B COMBAT] " .. golemType .. " attack HIT player (" .. PLAYER_ATTACK_DAMAGE .. " dmg)")
+								else
+									print("[ROOM B COMBAT] " .. golemType .. " attack MISSED player (distance: " .. string.format("%.1f", currentDist) .. ")")
+								end
+							end
+						end
+
+						task.wait(math.max(0, ATTACK_DURATION - ATTACK_DAMAGE_TIME))
+						lastAttackTime = tick()
+
+						if currentState == "Attacking" and golem.Parent and golem:GetAttribute("IsActive") then
+							if track then
+								pcall(function()
+									track:Stop(0.1)
+								end)
+							end
+							activeTrack = nil
+							setState("Chasing")
+						end
+					end)
+				else
+					-- Cooldown: keep chasing / facing, never freeze idle.
+					setState("Chasing")
+				end
+			else
+				setState("Chasing")
+			end
+
+			if currentState == "Chasing" then
+				ensureWalkPlaying()
+				timeSinceLastUpdate += dt
+				if timeSinceLastUpdate >= MOVE_INTERVAL then
+					timeSinceLastUpdate = 0
+
+					local stepDist = WALK_SPEED * MOVE_INTERVAL
+					local nextPos = root.Position + flatDir * stepDist
+					groundGolemAt(golem, root, nextPos, flatDir)
+
+					if math.random() < 0.08 then
+						print("[ROOM B MOVEMENT] " .. golemType .. " physically moving")
+						print("[ROOM B MOVEMENT] current position: " .. string.format("%.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z))
+						print("[ROOM B MOVEMENT] Target position: " .. string.format("%.1f, %.1f, %.1f", targetRoot.Position.X, targetRoot.Position.Y, targetRoot.Position.Z))
+						print("[ROOM B MOVEMENT] Distance: " .. string.format("%.1f", dist))
+					end
+				end
+			end
+		elseif currentState == "Attacking" then
+			timeSinceLastUpdate += dt
+			if timeSinceLastUpdate >= MOVE_INTERVAL then
+				timeSinceLastUpdate = 0
+				groundGolemAt(golem, root, root.Position, flatDir)
+			end
+		end
+	end)
+
+	trackConnection(golemType, activeConn)
+end
+
+------------------------------------------------------------------------
+-- Spawn / Activate
+------------------------------------------------------------------------
+
+local function spawnSingleGolem(golemName, preferredSpawnNames)
+	local template = getGolemTemplate(golemName)
+	if not template then
+		return nil
+	end
+
+	local spawnFolder = findSpawnFolder()
+	local spawnPart, resolvedSpawnName = findSpawnPart(spawnFolder, preferredSpawnNames)
+	if not spawnPart then
+		warn("[ROOM B ERROR] spawn point NOT FOUND for " .. golemName .. " (tried: " .. table.concat(preferredSpawnNames, ", ") .. ")")
+		return nil
+	end
+
+	print("[ROOM B GOLEMS] " .. resolvedSpawnName .. " resolved: " .. spawnPart:GetFullName())
+
+	local newGolem = template:Clone()
+	newGolem.Name = golemName
+
+	local root = resolveRoot(newGolem)
+	if not root then
+		warn("[ROOM B ERROR] " .. golemName .. " clone has no BasePart root!")
+		newGolem:Destroy()
+		return nil
+	end
+
+	-- Dormant collision / anchoring first so grounding is stable
+	applyGolemCollisionSetup(newGolem, root, false)
+
+	local faceDir = Vector3.new(0, 0, -1) -- face toward Room B entrance (south / -Z)
+	groundGolemAt(newGolem, root, spawnPart.Position, faceDir)
+
+	newGolem:SetAttribute("IsActive", false)
+	newGolem:SetAttribute("AIStarted", false)
+	CollectionService:AddTag(newGolem, "Golem")
+
+	ensureAnimator(newGolem)
+
+	local stats = GOLEM_STATS[golemName] or { MaxHealth = 200 }
+	local maxHealth = stats.MaxHealth
+	newGolem:SetAttribute("MaxHealth", maxHealth)
+	newGolem:SetAttribute("Health", maxHealth)
+
+	createHealthBar(newGolem, root, golemName, maxHealth)
+
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if not container then
+		container = Instance.new("Folder")
+		container.Name = "TrialChamberActiveGolems"
+		container.Parent = Workspace
+	end
+	newGolem.Parent = container
+
+	print("[ROOM B GOLEMS] " .. golemName .. " spawned")
+	print("[ROOM B GOLEMS] " .. golemName .. " guard spawned at " .. string.format("%.1f, %.1f, %.1f", root.Position.X, root.Position.Y, root.Position.Z))
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " animation controller initialized")
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " health initialized: " .. tostring(maxHealth) .. "/" .. tostring(maxHealth))
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " health bar initialized")
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " RootPart: FOUND")
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " Humanoid: " .. (newGolem:FindFirstChildOfClass("Humanoid") and "FOUND" or "MISSING"))
+	print("[ROOM B DIAGNOSTIC] " .. golemName .. " Animator: " .. ((newGolem:FindFirstChildOfClass("AnimationController") and newGolem:FindFirstChildOfClass("AnimationController"):FindFirstChildOfClass("Animator")) and "FOUND" or "MISSING"))
+
+	return newGolem
+end
+
+local Controller = {}
+
+function Controller.activateGolem(golem, golemType)
+	if not golem or not golem.Parent then
+		return
+	end
+
+	if golem:GetAttribute("AIStarted") == true and golem:GetAttribute("IsActive") == true then
+		print("[ROOM B GOLEMS] " .. golemType .. " already active — skipping duplicate activate")
+		return
+	end
+
+	local root = resolveRoot(golem)
+	if not root then
+		warn("[ROOM B ERROR] Cannot activate " .. golemType .. " — no root")
+		return
+	end
+
+	golem:SetAttribute("IsActive", true)
+	golem:SetAttribute("AIStarted", true)
+	applyGolemCollisionSetup(golem, root, true)
+	ensurePlayersInCollisionGroup()
+
+	-- Re-ground after collision setup so feet sit on floor
+	local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+	groundGolemAt(golem, root, root.Position, look)
+
+	print("[ROOM B DIAGNOSTIC] " .. golemType .. " movement controller initialized (Anchored root + PivotTo)")
+
+	local walkAnimId = getGolemAnimation(golem, "walk") or FALLBACK_ANIMS.Walk
+	local attackAnimId = getGolemAnimation(golem, "attack") or FALLBACK_ANIMS.Attack
+	spawnController(golem, golemType, walkAnimId, attackAnimId)
+end
+
+function Controller.spawnGolems()
+	print("[ROOM B GOLEMS] === GUARD SETUP ===")
+	print("[ROOM B DIAGNOSTIC] Spawning Golems")
+	print("[ROOM B GOLEMS] StoneGolem disabled for this encounter")
+
+	-- Reset prior encounter state
+	for golemType, conn in pairs(activeConnections) do
+		if conn then
+			conn:Disconnect()
+		end
+		activeConnections[golemType] = nil
+	end
+
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	if container then
+		for _, child in ipairs(container:GetChildren()) do
+			child:Destroy()
+		end
+	end
+
+	_G.SkeliDefeated = false
+	_G.GreenDefeated = false
+	_G.GateBCOpened = false
+	gateBCOpened = false
+	encounterStarted = true
+
+	local skeli = spawnSingleGolem("SkeliGolem", { "SkeliGuardSpawn", "SkeliSpawn" })
+	local green = spawnSingleGolem("GreenGolem", { "GreenGuardSpawn", "GreenSpawn" })
+
+	if skeli and green then
+		print("[ROOM B GOLEMS] Both guardians dormant")
+	elseif not skeli then
+		warn("[ROOM B ERROR] SkeliGolem failed to spawn")
+	elseif not green then
+		warn("[ROOM B ERROR] GreenGolem failed to spawn")
+	end
+
+	-- IMPORTANT: do NOT activate here. Activation happens in ActivateEncounter
+	-- after Gate AB fully closes.
+end
+
+function Controller.StartEncounter()
+	print("[ROOM B SYSTEM] TrialChamberGolemController StartEncounter called")
+	Controller.spawnGolems()
+end
+
+function Controller.ActivateEncounter()
+	print("[ROOM B SYSTEM] TrialChamberGolemController ActivateEncounter called")
+	print("[ROOM B GOLEMS] === GATE AB CLOSED ===")
+	print("[ROOM B GOLEMS] Activating SkeliGolem")
+
+	ensurePlayersInCollisionGroup()
+
+	local container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+	local skeli = container and container:FindFirstChild("SkeliGolem")
+	if skeli then
+		Controller.activateGolem(skeli, "SkeliGolem")
+	else
+		warn("[ROOM B ERROR] Could not find SkeliGolem to activate!")
+		-- Recovery: if StartEncounter never ran, spawn then activate
+		if not encounterStarted then
+			Controller.spawnGolems()
+			container = Workspace:FindFirstChild("TrialChamberActiveGolems")
+			skeli = container and container:FindFirstChild("SkeliGolem")
+			if skeli then
+				Controller.activateGolem(skeli, "SkeliGolem")
+			end
+		end
+	end
+end
+
+_G.TrialChamberGolemController = Controller
+_G.GolemController = Controller
+
+return Controller
